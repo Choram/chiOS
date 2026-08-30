@@ -1,0 +1,104 @@
+#+title: Roadmap
+
+* TODO Phase 0 - Bring-up [7/7]
+- [X] QEMU virt boot
+- [X] UART output
+- [X] M-mode firmware
+- [X] FDT handoff
+- [X] M -> S transition
+- [X] Zig kernel test
+- [X] Zig UART module
+
+* TODO Phase 1 - Physical / Virtual Memory [7/7]
+- [X] Parse RAM information from FDT
+- [X] Physical page allocator
+- [X] Sv32 page-table implementation
+- [X] Kernel mappings
+- [X] UART MMIO mapping
+- [X] Enable Sv32
+- [X] Page-fault test
+
+* TODO Phase 2 - Trap / Privilege [9/9]
+- [X] S-mode trap entry
+- [X] TrapFrame
+- [X] sscratch handling
+- [X] TrapFrame save / restore
+- [X] User / Kernel stack separation
+- [X] Exception dispatch
+- [X] U-mode code mapping
+- [X] S -> U transition
+- [X] U -> S -> U round trip test
+
+* TODO Phase 3 - Syscall Foundation [5/5]
+- [X] U-mode ECALL
+- [X] Syscall ABI
+- [X] SYS_PUTC
+- [X] SYS_EXIT
+- [X] Syscall dispatch
+
+* TODO Phase 4 - Process Model [6/6]
+- [X] Process structure
+- [X] Per-process kernel stack
+- [X] Saved CPU context
+- [X] Initial TrapFrame
+- [X] Process table
+- [X] Process states
+
+* TODO Phase 5 - Scheduling [0/10]
+- [ ] Process priority state
+- [ ] 16 priority ready queues
+- [ ] Smooth weighted priority selection
+- [ ] Kernel context switch
+- [ ] Scheduler context and process bootstrap
+- [ ] SYS_YIELD / cooperative scheduling
+- [ ] Multi-process scheduling test
+- [ ] Process exit handling
+- [ ] User fault terminates process
+- [ ] Supervisor timer interrupt / preemption
+
+* TODO Phase 6 - Block Device [0/5]
+- [ ] VirtIO MMIO discovery
+- [ ] VirtIo block initialization
+- [ ] Read one sector/block
+- [ ] Write one sector/block
+- [ ] Simple block-device abstraction
+
+* TODO Phase 7 - Filesystem Core [0/12]
+- [ ] Define on-disk layout
+- [ ] Superblock
+- [ ] FAT / allocation table
+- [ ] Data blocks
+- [ ] Root directory
+- [ ] Directory entry
+- [ ] Lookup path
+- [ ] Read file
+- [ ] Create file
+- [ ] Write file
+- [ ] Delete file
+- [ ] Directory support
+
+* TODO Phase 8 - File Interface / Syscalls [0/13]
+- [ ] Per-process file descriptor table
+- [ ] SYS_OPEN
+- [ ] SYS_READ
+- [ ] SYS_WRITE
+- [ ] SYS_SEEK
+- [ ] SYS_READDIR
+- [ ] SYS_MKDIR
+- [ ] SYS_UNLINK
+- [ ] SYS_CHDIR
+- [ ] SYS_GETCWD
+- [ ] stdin
+- [ ] stdout
+- [ ] stderr
+
+* TODO Phase 9 - Interactive Shell [0/5]
+- [ ] UART input
+- [ ] Line input
+- [ ] Command tokenizer
+- [ ] Command dispatch
+- [ ] Current working directory
+
+
+* DONE Milestone — Minimal Usable OS
+Boot to an interactive U-mode shell capable of manipulating files stored on the VirtIO-backed filesystem.

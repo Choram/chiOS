@@ -1,0 +1,294 @@
+#+title: <PHYSICAL MEMORY>
+
+* Purpose
+Discover usable physical RAM and provide fixed-size physical pages to the kernel.
+
+Physical pages are later used for page tables, kernel stacks, and other kernel allocations.
+
+* Structure
+** FDT Memory Description
+System RAM is described by a memory node such as:
+
+#+begin_example
+memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x08000000>;
+};
+#+end_example
+
+Node names generally follow:
+
+#+begin_example
+name@unit-address
+#+end_example
+
+For example:
+
+#+begin_example
+memory@80000000
+#+end_example
+
+- =memory= :: node name
+- =80000000= :: unit address
+- =device_type = "memory"= :: identifies system RAM
+- =reg= :: describes one or more RAM ranges
+
+The actual RAM range is obtained from =reg=, not from the node name.
+
+The parent node defines the encoding of =reg=:
+
+- =#address-cells= :: number of 32-bit cells used for an address
+- =#size-cells= :: number of 32-bit cells used for a size
+
+For:
+
+#+begin_example
+#address-cells = <2>;
+#size-cells    = <2>;
+#+end_example
+
+then:
+
+#+begin_example
+reg = <0x0 0x80000000 0x0 0x08000000>;
+#+end_example
+
+means:
+
+#+begin_example
+base = 0x80000000
+size = 0x08000000
+end  = 0x88000000
+#+end_example
+
+A =reg= property may contain multiple =<address, size>= entries.
+
+FDT cells are 32-bit big-endian values.
+
+** Reading the FDT
+An FDT is a single binary blob containing several blocks:
+
+- Header
+- Memory reservation block
+- Structure block
+- Strings block
+
+All FDT integer fields are stored in big-endian form.
+
+*** Header
+The header begins at the FDT address passed in =a1=.
+
+| Offset | Field             | Meaning                              |
+|--------+-------------------+--------------------------------------|
+| 0x00   | magic             | must be 0xd00dfeed                   |
+| 0x04   | totalsize         | total size of the FDT blob           |
+| 0x08   | off_dt_struct     | offset of the structure block        |
+| 0x0c   | off_dt_strings    | offset of the strings block          |
+| 0x10   | off_mem_rsvmap    | offset of the reservation block      |
+| 0x14   | version           | FDT format version                   |
+| 0x18   | last_comp_version | oldest compatible version            |
+| 0x1c   | boot_cpuid_phys   | physical ID of the boot CPU          |
+| 0x20   | size_dt_strings   | size of the strings block            |
+| 0x24   | size_dt_struct    | size of the structure block          |
+
+All offsets are relative to the beginning of the FDT.
+
+Thus:
+
+#+begin_example
+structure = fdt + off_dt_struct
+strings   = fdt + off_dt_strings
+#+end_example
+
+*** Structure Block
+The structure block contains the actual device tree as a sequence of
+32-bit tokens.
+
+| Value | Token          | Meaning                    |
+|-------+----------------+----------------------------|
+|     1 | FDT_BEGIN_NODE | begin a node               |
+|     2 | FDT_END_NODE   | end the current node       |
+|     3 | FDT_PROP       | property follows           |
+|     4 | FDT_NOP        | ignored                    |
+|     9 | FDT_END        | end of the structure block |
+
+After =FDT_BEGIN_NODE=:
+
+#+begin_example
+FDT_BEGIN_NODE
+node_name\0
+padding to 4-byte boundary
+#+end_example
+
+The node name is stored directly in the structure block.
+
+After =FDT_PROP=:
+
+#+begin_example
+FDT_PROP
+u32 len
+u32 nameoff
+u8  value[len]
+padding to 4-byte boundary
+#+end_example
+
+- =len= :: size of the property value
+- =nameoff= :: offset of the property name inside the strings block
+- =value= :: property data
+
+*** Strings Block
+The strings block stores property names such as:
+
+#+begin_example
+compatible\0
+device_type\0
+reg\0
+#address-cells\0
+#size-cells\0
+#+end_example
+
+A property's =nameoff= is relative to the beginning of this block.
+
+Therefore:
+
+#+begin_example
+property_name =
+    fdt + off_dt_strings + nameoff
+#+end_example
+
+The property value itself is not stored here; it follows =FDT_PROP= in
+the structure block.
+
+*** Traversal
+A basic parser reads the structure block sequentially:
+
+1. Read a 32-bit token.
+2. On =FDT_BEGIN_NODE=, read the node name and increase the tree depth.
+3. On =FDT_PROP=, read =len= and =nameoff=, then locate the property name
+   through the strings block.
+4. On =FDT_END_NODE=, decrease the tree depth.
+5. Ignore =FDT_NOP=.
+6. Stop at =FDT_END=.
+
+Node names and property values are padded to the next 4-byte boundary.
+
+For physical memory discovery, the parser keeps the root
+=#address-cells= and =#size-cells= values, locates a =memory@...= node,
+then decodes its =reg= property.
+
+** Physical Pages
+Physical RAM is managed in fixed-size pages.
+
+#+begin_example
+PAGE_SIZE = 4096
+#+end_example
+
+A page address must be 4 KiB aligned.
+
+#+begin_example
+address mod 4096 = 0
+#+end_example
+
+Useful alignment operations:
+
+#+begin_example
+align_down(x, n) = x & ~(n - 1)
+align_up(x, n)   = (x + n - 1) & ~(n - 1)
+#+end_example
+
+These expressions assume that =n= is a power of two.
+
+** Reserved Regions
+Discovered RAM is not necessarily free RAM.
+
+At minimum, the allocator must exclude:
+
+- firmware
+- kernel image
+- kernel stack
+- FDT
+- explicitly reserved platform memory
+
+Kernel image boundaries can be exported by the linker:
+
+#+begin_example
+__kernel_start
+__kernel_end
+#+end_example
+
+The FDT occupies:
+
+#+begin_example
+[fdt_ptr, fdt_ptr + totalsize)
+#+end_example
+
+A page must not enter the allocator if it overlaps a reserved region.
+
+** Free-List Allocator
+The allocator uses an intrusive singly linked free list.
+
+#+begin_src zig
+const FreePage = struct {
+    next: ?*FreePage,
+};
+#+end_src
+
+Each free page stores the pointer to the next free page inside its own memory.
+
+#+begin_example
+free_head -> page -> page -> page -> null
+#+end_example
+
+Allocation:
+
+#+begin_example
+page      <- free_head
+free_head <- page.next
+#+end_example
+
+Free:
+
+#+begin_example
+page.next <- free_head
+free_head <- page
+#+end_example
+
+Both allocation and freeing are O(1).
+
+A minimal interface is:
+
+#+begin_example
+initPageAllocator(...)
+allocPage()
+allocZeroedPage()
+freePage(page)
+#+end_example
+
+=allocZeroedPage()= allocates a page and clears all 4096 bytes.
+
+* Operation
+1. Receive the FDT pointer from the assembly kernel entry.
+2. Locate a memory node in the FDT.
+3. Decode its =reg= property to obtain RAM base and size.
+4. Exclude occupied and reserved regions.
+5. Align usable ranges to 4 KiB boundaries.
+6. Insert each usable page into the free list.
+7. Allocate pages by removing the head of the free list.
+8. Free pages by inserting them back at the head.
+9. Provide pages to later subsystems such as Sv32 page-table management.
+
+* Invariants
+- Every managed page is exactly 4096 bytes.
+- Every managed page is 4 KiB aligned.
+- Every free page lies inside discovered RAM.
+- Reserved or occupied regions never enter the free list.
+- An allocated page is not present in the free list.
+- A page appears at most once in the free list.
+- Free-list metadata exists only inside free pages.
+- Allocation returns either one valid page or no page when memory is exhausted.
+
+* Notes
+** Gotchas
+- =#address-cells= and =#size-cells= are separate FDT properties; each appears as its own =FDT_PROP=. A =reg= property, however, may contain multiple address/size cell pairs in a single value.
+
+** Decisions

@@ -1,0 +1,207 @@
+#+title: Syscalls
+
+* Purpose
+Syscalls provide the controlled service boundary between U-mode programs and the S-mode kernel.
+
+A U-mode program requests a kernel service by placing a syscall number and its arguments in designated registers and executing =ecall=. The resulting environment-call exception enters the ordinary S-mode trap path.
+
+The trap subsystem is responsible for preserving and restoring the U-mode CPU context. The syscall subsystem is responsible only for interpreting the saved register state as a syscall request and performing the requested kernel operation.
+
+The initial syscall layer is intentionally small. Its purpose is to establish a stable U-mode/kernel calling convention before process management, scheduling, filesystems, and richer userland services are introduced.
+
+
+* Structure
+A syscall begins as an ordinary U-mode trap.
+
+For an =ecall= executed in U-mode:
+
+- the architectural exception cause is 8 (=Environment call from U-mode=)
+- M-mode delegates this exception to S-mode through =medeleg=
+- the normal S-mode trap entry saves the interrupted U-mode state into its =TrapFrame=
+- the high-level trap dispatcher recognizes cause 8 as a syscall
+- the syscall dispatcher interprets the saved argument registers
+- the syscall result is written back into the saved =TrapFrame=
+- the saved =sepc= is advanced past the =ecall=
+- the ordinary trap return path restores the U-mode context and executes =sret=
+
+The syscall subsystem therefore does not require a separate low-level entry path. It reuses the existing U-mode trap boundary.
+
+The initial syscall ABI is:
+
+- =a7= : syscall number
+- =a0= : argument 0
+- =a1= : argument 1
+- =a2= : argument 2
+- =a3= : argument 3
+- =a4= : argument 4
+- =a5= : argument 5
+- =a0= : return value
+
+The syscall dispatcher reads these values from the saved =TrapFrame= rather than directly from the live CPU registers.
+
+Conceptually:
+
+#+begin_example
+U-mode registers
+
+    a7 = syscall number
+    a0 = arg0
+    a1 = arg1
+    ...
+    a5 = arg5
+
+        |
+        | ecall
+        v
+
+TrapFrame
+
+    a7 = syscall number
+    a0 = arg0
+    a1 = arg1
+    ...
+    a5 = arg5
+
+        |
+        | syscall dispatch
+        v
+
+TrapFrame
+
+    a0   = return value
+    sepc = sepc + 4
+#+end_example
+
+The initial syscall numbers are:
+
+#+begin_example
+SYS_PUTC = 1
+SYS_EXIT = 2
+#+end_example
+
+=SYS_PUTC= provides the first U-mode output primitive.
+
+Its initial ABI is:
+
+#+begin_example
+a7 = SYS_PUTC
+a0 = byte to write
+#+end_example
+
+The kernel writes the low byte of =a0= to the UART-backed console and returns success in =a0=.
+
+=SYS_EXIT= provides the first termination primitive.
+
+Its initial ABI is:
+
+#+begin_example
+a7 = SYS_EXIT
+a0 = exit status
+#+end_example
+
+Phase 3 does not yet contain a process lifecycle or scheduler. Therefore the initial implementation may report the exit status and stop execution rather than attempting to destroy or schedule processes.
+
+Process-aware exit semantics are introduced later with the process model.
+
+The high-level relationship between trap and syscall dispatch is:
+
+#+begin_example
+supervisor_trap_entry
+        |
+        | saves U-mode state
+        v
+trapDispatch(tf, scause, stval)
+        |
+        | scause == 8
+        v
+syscallDispatch(tf)
+        |
+        | modifies saved state
+        v
+TrapFrame*
+        |
+        v
+supervisor_trap_return
+#+end_example
+
+The trap dispatcher owns classification of traps. The syscall dispatcher owns interpretation of the syscall ABI.
+
+A syscall handler does not restore registers or execute =sret= itself. It modifies the saved =TrapFrame= and returns control to the ordinary trap return path.
+
+
+* Operation
+1. A U-mode program prepares a syscall request. The syscall number is placed in =a7= and arguments are placed in =a0= through =a5= as required by that syscall.
+
+2. The U-mode program executes =ecall=.
+
+3. RISC-V raises exception cause 8, =Environment call from U-mode=.
+
+4. The exception is delegated to S-mode by =medeleg=.
+
+5. Hardware enters the S-mode trap entry point. =sepc= identifies the address of the =ecall= instruction.
+
+6. The normal U-mode trap entry saves the user GPRs, =sepc=, and =sstatus= into the current =TrapFrame=.
+
+7. Trap entry switches from the user stack to the kernel stack.
+
+8. The high-level trap dispatcher receives the saved =TrapFrame= and observes =scause = 8=.
+
+9. The trap dispatcher transfers the request to the syscall dispatcher.
+
+10. The syscall dispatcher reads the syscall number from =tf.a7=.
+
+11. The dispatcher selects the corresponding syscall handler.
+
+12. The syscall handler reads its arguments from the saved argument registers in the =TrapFrame=.
+
+13. The requested kernel operation is performed.
+
+14. If the syscall returns normally, its result is written to =tf.a0=.
+
+15. The saved program counter is advanced by one 32-bit instruction:
+
+#+begin_example
+tf.sepc += 4
+#+end_example
+
+16. The syscall dispatcher returns the =TrapFrame= to the trap subsystem.
+
+17. The ordinary supervisor trap return path restores =sepc=, =sstatus=, and the saved user GPRs.
+
+18. =sscratch= is restored to the current =TrapFrame= pointer according to the U-mode trap convention.
+
+19. =sret= returns execution to U-mode.
+
+20. User execution continues at the instruction immediately following the original =ecall=.
+
+
+* Invariants
+- Syscalls may be requested only through the established U-mode trap boundary.
+- A U-mode =ecall= reaches S-mode as exception cause 8.
+- The full interrupted U-mode register state is saved before ordinary Zig syscall code executes.
+- =a7= contains the syscall number at syscall entry.
+- =a0= through =a5= contain syscall arguments according to the individual syscall definition.
+- A normally returning syscall places its return value in =a0=.
+- Syscall handlers operate on the saved =TrapFrame= and do not directly perform low-level register restoration.
+- A normally returning syscall advances the saved =sepc= past the =ecall= instruction before U-mode is resumed.
+- The ordinary trap return path is the only path responsible for restoring the U-mode execution context and executing =sret=.
+- The syscall subsystem does not use the user stack as kernel working storage.
+- Kernel-owned syscall data and kernel stacks remain inaccessible from U-mode.
+- An unknown syscall number must not silently execute an unrelated kernel operation.
+- The initial syscall ABI remains independent of the later scheduler and process representation.
+
+
+* Notes
+** Gotchas
+
+** Decisions
+- Syscalls reuse the ordinary U-mode trap entry and return paths.
+- =a7= is the syscall-number register.
+- =a0= through =a5= are syscall argument registers.
+- =a0= is also the syscall return-value register.
+- The initial syscall namespace begins with =SYS_PUTC = 1= and =SYS_EXIT = 2=.
+- Syscall dispatch is kept separate from generic trap classification.
+- =trapDispatch= determines that a trap is a U-mode =ecall=; the syscall subsystem interprets the syscall request.
+- The initial =SYS_PUTC= implementation writes directly to the UART-backed kernel console.
+- The initial =SYS_EXIT= implementation may terminate the Phase 3 test context without implementing process destruction.
+- Process-aware blocking, termination, scheduling, and resource ownership are deferred until the process model exists.

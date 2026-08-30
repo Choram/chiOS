@@ -1,0 +1,190 @@
+#+title: Architecture
+
+
+* Overview
+
+ChiOS is a small RISC-V RV32 operating system targeting the QEMU =virt= platform.
+
+The system is divided into:
+
+#+begin_example
+                     QEMU virt
+                        |
+                        v
+                  M-mode firmware
+                        |
+                        | mret
+                        v
+                  S-mode kernel
+                        |
+        +---------------+---------------+
+        |               |               |
+        v               v               v
+      Memory          Traps           Devices
+        |               |               |
+        |               v               v
+        |           Syscalls         VirtIO
+        |               |               |
+        +-------+-------+               |
+                |                       |
+                v                       v
+             Processes             Block storage
+                |                       |
+                v                       v
+             Scheduler             Filesystem
+                |
+                +-------+
+                        |
+                        v
+                     U-mode
+                        |
+                        v
+                      Shell
+#+end_example
+
+* Linker and Assembly
+See: [[file:subsystem/linker_assembly.org][Linker and Assembly]]
+
+* Boot / Firmware
+Execution begins in M-mode
+
+The firmware is responsible for performing the minimum machine-level initialization required before transferring control to the S-mode kernel.
+
+Main responsibilities:
+- establish an initial stack
+- receive the FDT from QEMU
+- confiture privilege delegation
+- confiture PMP if required
+- prepare =mstatus.MPP=
+- set =mepc=
+- enter S-mode using =mret=
+
+See: [[file:subsystem/boot.org][Boot / Firmware]]
+Related source files: [[file:../src/firmware.s]], [[file:../src/kernel_entry.s]], [[file:../src/kernel.zig]], [[file:../src/uart.zig]]
+
+* Physical memory
+Physical memory management is initialized in the Zig kernel after the minimal assembly entry code establishes the kernel stack.
+
+RAM information is obtained from the FDT and usable memory is divided into 4 KiB physical pages.
+
+Main responsibilities:
+- receive the FDT pointer from the kernel entry code
+- discover available RAM from the FDT
+- exclude memory already occupied or reserved
+- divide usable RAM into 4 KiB pages
+- maintain free pages using an intrusive free list
+- allocate and return individual physical pages
+- provide physical pages for page tables and other kernel subsystems
+
+Each free page stores the pointer to the next free page in its own memory, so no separate allocator metadata area is required.
+
+See: [[file:subsystem/physical_memory.org][Physical Memory]]
+Related source files: [[file:../src/fdt.zig]], [[file:../src/memory.zig]]
+
+* Virtual Memory
+Virtual memory management is initialized after the physical page allocator becomes available.
+
+The kernel uses Sv32 page tables to translate virtual addresses into physical addresses and to control access permissions.
+
+Main responsibilities:
+- create and manage Sv32 page tables
+- allocate page-table pages from the physical page allocator
+- map virtual pages to physical pages
+- establish kernel mappings
+- map required MMIO regions such as UART
+- configure =satp= and enable address translation
+- provide mapping operations for later user address spaces
+
+Sv32 uses two levels of page tables. Each page table occupies one 4 KiB physical page and contains 1024 page-table entries.
+
+Initially, the kernel uses identity mappings so that important kernel addresses remain unchanged when virtual memory is enabled.
+
+See: [[file:subsystem/virtual_memory.org][Virtual Memory]]
+Related source files: [[file:../src/sv32.zig]], [[file:../src/sv32_control.s]]
+
+* Trap / Privilege
+Trap and privilege handling provides the transition boundary between U-mode programs and the S-mode kernel.
+
+M-mode firmware performs only the initial privilege setup and delegates kernel-owned exceptions and interrupts to S-mode. Normal kernel trap handling then occurs in S-mode.
+
+Main responsibilities:
+- install M-mode and S-mode trap entry points
+- delegate kernel-owned traps from M-mode to S-mode
+- save interrupted CPU state into a TrapFrame
+- dispatch exceptions and interrupts
+- maintain separate user and kernel stacks
+- use =sscratch= during user-to-kernel trap transitions
+- enter U-mode with controlled register and privilege state
+- restore execution with =sret=
+
+An U-mode trap switches execution into the S-mode kernel, preserves the user context, performs the required kernel operation, and later restores the saved context before returning to U-mode.
+
+The kernel therefore treats the TrapFrame as the boundary representation between an interrupted execution context and ordinary kernel code.
+
+See: [[file:subsystem/traps.org][Traps]], [[file:subsystem/trap_privilege.org][Trap / Privilege]]
+Related source files: [[file:../src/trap_entry.s]], [[file:../src/trap.zig]]
+
+* Syscall
+Syscalls provide the controlled service boundary between U-mode programs and the S-mode kernel.
+
+A syscall is requested by executing =ecall= in U-mode. The trap enters the existing S-mode trap path, the kernel interprets the saved register state as a syscall request, performs the requested operation, writes the return value back into the TrapFrame, advances =sepc= past the =ecall= instruction, and resumes U-mode with =sret=.
+
+Main responsibilities:
+- recognize U-mode =ecall= exceptions
+- define a syscall ABI using saved user registers
+- dispatch syscall numbers to kernel handlers
+- provide basic kernel services to U-mode programs
+- return results through the TrapFrame
+- resume execution after the =ecall=
+
+The initial syscall ABI uses:
+- =a7= : syscall number
+- =a0..a5= : syscall arguments
+- =a0= : return value
+
+The initial syscall set is intentionally small. The first useful calls are:
+- =SYS_PUTC= : write one character to the UART console
+- =SYS_EXIT= : terminate the current U-mode program
+
+Since =ecall= is itself the trapping instruction, the kernel must advance the saved =sepc= by 4 before returning. Otherwise the same =ecall= would be re-executed forever.
+
+See: [[file:subsystem/Syscall.org][Syscall]]
+Related source files: [[file:../src/trap.zig]], [[file:../src/syscall.zig]]
+
+* Process
+A process represents an independently managed execution context consisting of user execution state, kernel execution state, memory state, and lifecycle information.
+
+Each process owns the state required to stop its execution and later resume it. User-mode execution state is represented by a =TrapFrame=, while suspended S-mode kernel execution is represented separately by a saved kernel =Context=. A process also owns a private kernel stack used whenever its execution enters the kernel.
+
+Main responsibilities:
+- assign a stable process identity
+- track the process lifecycle and scheduling state
+- preserve resumable U-mode execution in a =TrapFrame=
+- preserve resumable S-mode execution in a kernel =Context=
+- provide a private kernel stack for kernel execution
+- associate the process with its virtual address space
+- provide a stable unit for later scheduling and resource ownership
+
+The process model conceptually contains:
+#+begin_example
+Process
++---- pid
++---- state
++---- address space
++---- TrapFrame
++---- Context
++---- kernel stack
+#+end_example
+
+The =TrapFrame= and =Context= represent different execution boundaries. The =TrapFrame= contains the U-mode state required to return through =sret=, while the =Context= contains the S-mode state required to suspend kernel execution and later continue from the same kernel call chain.
+
+The per-process kernel stack stores the active kernel call frames belonging to that process. Keeping kernel stacks separate allows one process to remain suspend inside the kernel while another proces executes without overwriting the suspended kernel state.
+
+A newly created process receives an initial =TrapFrame= that describes its first U-mode execution state, including its entry PC, user stack pointer, privilege state, kernel stack, and trap metadata. From the trap subsystem's point of view, first execution is therefore equivalent to restoring an already prepared user context.
+
+Processes are managed through a provess table and move through explicit lifecycle status. The initial state model distinguishes unused process slots, runnable processes, the currently running process, blocked processes waiting for an event, and processes that have exited.
+
+The process abstraction is intentionally independent of the scheduler policy. Phase 4 establishes the state required to represent and resume processes; later scheduling code decides when and which process should run.
+
+See: [[file:subsystem/Process.org][Process]]
+Related source files: [[file:../src/process.zig]], [[file:../src/kernel.zig]]

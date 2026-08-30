@@ -1,0 +1,177 @@
+#+title: <SHELL IDEAS>
+
+* Jird (the language)
+Document at: [[file:Jird.org]]
+
+* MICE (the terminal)
+Document at: [[file:MICE.org]]
+
+
+Example of Jird + MICE
+#+begin_src text
+chiOS/0.1
+MICE/0.1
+
+ok> 2 3 + .
+5
+ok>
+
+ok> { 1 2 3 4 } [ dup * ] map .
+{ 1 4 9 16 }
+ok>
+
+
+ok> @:@ .
+path(@home mice Projects Jird@)
+ok>
+
+ok> @: rodents@ childs .
+{
+    path(@home mice Projects Jird rodents vole.txt@)
+    path(@home mice Projects Jird rodents jerboa.txt@)
+    path(@home mice Projects Jird rodents marmot.org@)
+    path(@home mice Projects Jird rodents capybara.bin@)
+}
+ok>
+
+ok> @: rodents@ childs [ size ] map .
+{ 812 391 1204 8192 }
+ok>
+
+ok> @: rodents@ childs [ size ] map 0 [ + ] fold .
+10599
+ok>
+
+
+ok> [ childs [ size ] map 0 [ + ] fold ] "weight" define
+ok>
+
+ok> @: rodents@ weight .
+10599
+ok>
+
+ok> @: nests@ weight .
+32768
+ok>
+
+
+ok> "weight" how
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+Its declared stack effect is ( Path -- Int ).
+Returns the combined size of the immediate children.
+ok>
+
+
+ok> @mice commands@ childs [ name ] map .
+{ "fetch.jrd" "hamster.jrd" "weight.jrd" }
+ok>
+
+
+ok> @: rodents nutria.txt@ exists? .
+no
+ok> why
+because it worked.
+ok>
+
+
+ok> { "vole" "jerboa" "marmot" } unpack
+ok> .s
+<3> "vole" "jerboa" "marmot"
+ok> drop drop drop
+
+
+ok> _f @home mice@ under ?
+There are 183 candidates.
+ok>
+
+ok> _f file
+There are 141 candidates.
+ok>
+
+ok> _f _s sized
+I know their sizes.
+ok>
+
+ok> _s 1GiB >
+Seven candidates remain.
+ok>
+
+ok> which .
+{
+    path(@home mice archive.img@)
+    path(@home mice backups rat_2026.img@)
+    path(@home mice data capybara.bin@)
+    path(@home mice data marmot.bin@)
+    path(@home mice VM vole.img@)
+    path(@home mice VM jerboa.img@)
+    path(@home mice Projects old_build.bin@)
+}
+ok>
+
+
+ok> @mnt archive@ unmount
+The target is busy.
+no> why
+Two processes hold files open.
+ok> which .
+{ 81 104 }
+ok>
+
+ok> [ @mnt archive@ unmount ] ?
+A safe plan exists.
+ok>
+
+ok> show
+[
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+ok>
+
+ok> show "leave_nest" define
+ok>
+
+
+ok> [ drop ] "dup" define
+Please don't.
+no> why
+because you will probably want DUP later.
+ok>
+
+ok> [ drop ] "dup" define
+Please don't.
+no> [ drop ] "dup" define
+Okay, I warned you enough.
+ok>
+
+ok> @mice dups@ childs .
+{
+    path(@mice dups dup.jrd@)
+}
+ok>
+
+ok> 42 dup
+ok> .s
+<0>
+ok>
+
+ok> resp
+I told you you would miss the primitives.
+ok>
+
+ok> 42 dup .s
+<2> 42 42
+ok>
+
+
+ok> fetch
+
+[fancy schmancy ricing fetch]
+
+[a logo would normally be here.]
+
+The operating system is chiOS, version 0.1.
+You could have asked VERSION.
+
+ok>
+#+end_src

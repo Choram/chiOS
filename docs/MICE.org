@@ -1,0 +1,1489 @@
+#+title: MICE
+#+subtitle: Machine Interface and Control Environment
+#+startup: overview
+#+options: toc:3 num:nil
+
+* Status
+
+This document describes the current design of MICE.
+
+MICE is the standard interactive environment of chiOS and the primary host for
+Jird.
+
+Jird language semantics are specified in =Jird.org=.
+
+This document specifies:
+
+- prompts;
+- interactive session policy;
+- command persistence;
+- command discovery;
+- duplicate definitions;
+- primitive probation;
+- introspection presentation;
+- system voice;
+- startup and serious failure reporting.
+
+MICE does not define a second shell language.
+
+At the MICE prompt, the user writes Jird.
+
+* Overview
+
+MICE stands for:
+
+#+begin_quote
+Machine Interface and Control Environment
+#+end_quote
+
+Conceptually:
+
+#+begin_src text
+chiOS
+|
++-- RAT
+|   Random Access Tree
+|   filesystem
+|
+`-- MICE
+    Machine Interface and Control Environment
+    |
+    `-- Jird
+        language
+#+end_src
+
+MICE should feel more like an interactive computing environment than a Unix-style
+command dispatcher.
+
+The user manipulates Jird values, quotations, paths, addresses, filesystem
+objects, symbolic goals, and structured Failures.
+
+MICE supplies continuity around those values.
+
+* Design principles
+
+** Jird is the only command language
+
+MICE should not accumulate a separate shell grammar.
+
+No special pipeline syntax, redirection grammar, or natural-language command layer
+should sit beside Jird unless there is an overwhelming implementation reason.
+
+The prompt directly evaluates Jird.
+
+** The prompt reflects live session state
+
+The prompt does not report merely whether the previous command returned
+successfully.
+
+Instead:
+
+#+begin_src text
+ok>    no unresolved Failure is active
+no>    an unresolved Failure is active
+#+end_src
+
+This distinction is central to MICE.
+
+** Success is not truth
+
+Jird Boolean values are:
+
+#+begin_src text
+ok
+no
+#+end_src
+
+Prompt states are:
+
+#+begin_src text
+ok>
+no>
+#+end_src
+
+Example:
+
+#+begin_src text
+ok> @: rodents nutria.txt@ exists? .
+no
+ok>
+#+end_src
+
+The Boolean result is false.
+
+The session has no unresolved Failure.
+
+** A successful command does not necessarily produce =ok>=
+
+If a Failure remains unresolved, unrelated successful commands leave the prompt at
+=no>=.
+
+Example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> 2 3 + .
+5
+no>
+#+end_src
+
+Arithmetic succeeded, but the mount Failure remains current.
+
+** A related successful command may restore =ok>=
+
+If the relevant Failure condition becomes false, Jird discharges the Failure.
+
+Example:
+
+#+begin_src text
+no> which [ terminate-graceful ] map
+ok>
+#+end_src
+
+MICE merely reflects the new Jird session state.
+
+** Visible state over hidden magic
+
+Where practical, persistent MICE state should correspond to inspectable RAT
+objects.
+
+The most important example is the duplicate layer:
+
+#+begin_src text
+@mice dups@
+#+end_src
+
+* Prompt
+
+MICE has two primary prompts.
+
+** =ok>=
+
+=ok>= means:
+
+#+begin_quote
+No unresolved Jird Failure is currently active.
+#+end_quote
+
+It is normally the startup prompt.
+
+#+begin_src text
+MICE/0.1
+
+ok>
+#+end_src
+
+** =no>=
+
+=no>= means:
+
+#+begin_quote
+A structured Jird Failure is currently active in the session.
+#+end_quote
+
+Example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+#+end_src
+
+The prompt remains =no>= until:
+
+- Jird automatically discharges the Failure because its resolution condition is
+  now satisfied; or
+- the user explicitly discards it.
+
+** Prompt is not data
+
+The prompt itself is not a Jird value.
+
+It is a presentation of session state.
+
+* Interactive transaction model
+
+Each submitted interactive unit is handled as a small interpreter transaction.
+
+This protects interpreter consistency.
+
+It is not a general operating-system transaction.
+
+** Before execution
+
+MICE marks or snapshots enough session-local state to recover from an aborted
+evaluation.
+
+This may include:
+
+- data-stack position or contents;
+- temporary dictionary mutations;
+- incomplete definition state;
+- symbolic goal edits;
+- pending primitive-probation state.
+
+The exact implementation need not copy the whole session.
+
+** Successful evaluation
+
+If evaluation completes normally:
+
+1. interpreter-local changes are committed;
+2. relevant Failure resolution conditions are reevaluated by Jird;
+3. the prompt is rendered from the resulting Failure state.
+
+Therefore:
+
+#+begin_src text
+successful transaction
+    does not imply
+ok>
+#+end_src
+
+** Failed evaluation
+
+If evaluation produces a top-level Failure:
+
+- remaining words in the submitted unit stop;
+- interpreter-local state is restored where appropriate;
+- the new Failure remains active;
+- the next prompt is =no>=.
+
+** External side effects are not rolled back
+
+If a command performs a real operating-system effect before a later word fails,
+MICE does not reverse that effect automatically.
+
+Example:
+
+#+begin_src text
+@: vole.tmp@ remove
+1 0 /
+#+end_src
+
+may remove the file before division fails.
+
+MICE transactions preserve interpreter consistency, not arbitrary world-state
+atomicity.
+
+* Session state
+
+A MICE session conceptually contains:
+
+#+begin_src text
+Session
+    Jird stack
+    Jird dictionary/cache
+    current path
+    current symbolic goal
+    current Failure
+    command discovery index
+    duplicate index
+    primitive-probation state
+    history
+#+end_src
+
+Some of these may be absent in early implementations.
+
+The important distinction is that Failure is a Jird semantic object, while MICE
+preserves and presents it.
+
+* Current path
+
+MICE supplies the current interactive path used by Jird relative Path literals.
+
+Examples:
+
+#+begin_src text
+@:@
+@: rodents@
+@::@
+#+end_src
+
+Jird defines relative-path semantics.
+
+MICE supplies the current path against which those literals resolve.
+
+Once a Path literal has resolved to a canonical Path value, later current-path
+changes do not mutate that value.
+
+* Definitions and persistence
+
+Jird =define= means:
+
+#+begin_quote
+bind or rebind a value to a name.
+#+end_quote
+
+MICE persistence is a separate policy.
+
+This distinction is important.
+
+** New persistent commands
+
+A quotation definition such as:
+
+#+begin_src text
+[ dup * ] "hamster" define
+#+end_src
+
+is naturally persistable as:
+
+#+begin_src text
+@mice commands hamster.jrd@
+#+end_src
+
+with source:
+
+#+begin_src text
+[ dup * ] "hamster" define
+#+end_src
+
+or:
+
+#+begin_src text
+&effect ( Int -- Int )
+&description Squares an integer.
+
+[ dup * ] "hamster" define
+#+end_src
+
+** Values that may be persisted
+
+Stable, serializable values may be candidates for automatic persistence.
+
+Examples:
+
+#+begin_src text
+Int
+Bool
+String
+stable Path
+Quote
+#+end_src
+
+Exact policy remains open.
+
+** Ephemeral runtime values
+
+Some values must not be blindly persisted.
+
+The clearest example is =Addr=.
+
+#+begin_src text
+4096 alloc "burrow" define
+#+end_src
+
+binds =burrow= to a live machine address.
+
+That address may become meaningless after:
+
+- =free=;
+- process restart;
+- kernel restart;
+- reboot;
+- allocator changes.
+
+MICE therefore must not serialize the raw address merely because =define=
+succeeded.
+
+Other likely ephemeral values include =Process=, open handles, sockets, and
+temporary device references when those are introduced.
+
+** Binding and persistence are separate
+
+The intended conceptual distinction is:
+
+#+begin_src text
+define
+    current Jird binding
+
+persist
+    ability to reconstruct a binding in a later session
+#+end_src
+
+This distinction should remain visible in the implementation.
+
+* Command storage
+
+The conceptual ordinary command directory is:
+
+#+begin_src text
+@mice commands@
+#+end_src
+
+A command named:
+
+#+begin_src text
+hamster
+#+end_src
+
+corresponds to:
+
+#+begin_src text
+@mice commands hamster.jrd@
+#+end_src
+
+The source remains valid Jird.
+
+MICE should not invent a second serialized command format when =.jrd= is enough.
+
+* Command discovery
+
+MICE should discover commands without executing all source files at boot.
+
+** Startup scan
+
+MICE may scan:
+
+#+begin_src text
+@mice commands@
+@mice dups@
+#+end_src
+
+and index basenames.
+
+Example:
+
+#+begin_src text
+hamster.jrd
+weight.jrd
+fetch.jrd
+#+end_src
+
+becomes:
+
+#+begin_src text
+hamster
+weight
+fetch
+#+end_src
+
+** Lazy loading
+
+When a name is needed, MICE may load the corresponding source only then.
+
+A source file advertised as =vole.jrd= should actually define =vole=.
+
+Otherwise MICE should report a malformed command source.
+
+* Lookup layers
+
+The central MICE rule is:
+
+#+begin_quote
+dups first.
+original second.
+#+end_quote
+
+Conceptually:
+
+#+begin_src text
+@mice dups@
+      |
+      v
+@mice commands@
+      |
+      v
+builtins
+#+end_src
+
+A live dictionary may cache these results, but user-visible semantics should
+remain equivalent to the layered model.
+
+** Example
+
+Assume:
+
+#+begin_src text
+@mice commands hamster.jrd@
+@mice commands fetch.jrd@
+
+@mice dups dup.jrd@
+#+end_src
+
+Then:
+
+#+begin_src text
+hamster -> commands/hamster.jrd
+fetch   -> commands/fetch.jrd
+dup     -> dups/dup.jrd
+drop    -> builtin DROP
+nutria  -> undefined
+#+end_src
+
+* Duplicate definitions
+
+A duplicate is an intentional binding that shadows an already existing name.
+
+MICE preserves the original and stores the shadowing source under:
+
+#+begin_src text
+@mice dups@
+#+end_src
+
+** Ordinary duplicate
+
+Suppose:
+
+#+begin_src text
+@mice commands vole.jrd@
+#+end_src
+
+contains:
+
+#+begin_src text
+[ "squeak" . ] "vole" define
+#+end_src
+
+A later definition:
+
+#+begin_src text
+[ "first vole" . ] "vole" define
+#+end_src
+
+may be stored as:
+
+#+begin_src text
+@mice dups vole.jrd@
+#+end_src
+
+Then:
+
+#+begin_src text
+ok> vole
+first vole
+ok>
+#+end_src
+
+The original remains intact.
+
+** Inspecting duplicates
+
+Duplicate state is visible through ordinary Jird filesystem operations.
+
+#+begin_src text
+ok> @mice dups@ childs .
+{
+    path(@mice dups vole.jrd@)
+    path(@mice dups dup.jrd@)
+}
+ok>
+#+end_src
+
+* Primitive probation
+
+Builtin primitive redefinition receives one small friction mechanism.
+
+MICE does not ask:
+
+#+begin_src text
+Are you sure? [y/N]
+#+end_src
+
+Repeated intent is the confirmation.
+
+** First attempt
+
+#+begin_src text
+ok> [ drop ] "dup" define
+Please don't.
+no>
+#+end_src
+
+This produces a Failure associated with the rejected primitive redefinition.
+
+No duplicate is installed yet.
+
+** =why=
+
+#+begin_src text
+no> why
+because you will probably want DUP later.
+no>
+#+end_src
+
+The Failure remains active.
+
+** Repetition
+
+If the same definition is immediately repeated:
+
+#+begin_src text
+no> [ drop ] "dup" define
+Okay, I warned you enough.
+ok>
+#+end_src
+
+the user has confirmed intent.
+
+MICE installs:
+
+#+begin_src text
+@mice dups dup.jrd@
+#+end_src
+
+The probation Failure is discharged because the requested override has now been
+accepted.
+
+** Matching
+
+The probation state should identify at least:
+
+- primitive name;
+- canonical source or source fingerprint.
+
+A different definition should not accidentally confirm the first attempt.
+
+** No moralizing after acceptance
+
+Once confirmed, MICE simply obeys the duplicate.
+
+#+begin_src text
+ok> 42 dup
+ok> .s
+<0>
+ok>
+#+end_src
+
+* Restoring duplicates
+
+Because duplicates live in a separate layer, restoration is conceptually simple.
+
+#+begin_src text
+remove duplicate
+    |
+    v
+lookup falls through
+    |
+    v
+original appears again
+#+end_src
+
+** =resp=
+
+=resp= is retained provisionally as primitive restoration.
+
+Example:
+
+#+begin_src text
+ok> resp
+I told you you would miss the primitives.
+ok>
+#+end_src
+
+The exact general duplicate-management vocabulary remains open.
+
+Possible future rules include:
+
+- =resp= restores only primitives;
+- a separate word manages ordinary duplicates;
+- =resp= accepts an optional name.
+
+* Structured Failure in MICE
+
+MICE does not define Failure semantics.
+
+Jird does.
+
+MICE's job is to preserve and expose the current Failure across interactive
+submissions.
+
+** Failure remains live
+
+Example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> 2 3 + .
+5
+no>
+#+end_src
+
+The arithmetic command succeeded.
+
+The mount Failure still exists.
+
+** Automatic discharge
+
+If a command changes the relevant state so that the Failure resolution condition
+becomes true:
+
+#+begin_src text
+no> which [ terminate-graceful ] map
+ok>
+#+end_src
+
+the prompt changes automatically.
+
+MICE does not decide that the problem was solved.
+
+Jird has already discharged the Failure.
+
+MICE merely renders:
+
+#+begin_src text
+failure == none ? "ok>" : "no>"
+#+end_src
+
+** Explicit discard
+
+#+begin_src text
+no> discard
+ok>
+#+end_src
+
+means the user no longer wants the Failure tracked.
+
+It does not claim that the failed operation was completed.
+
+* =why=
+
+=why= presents Jird's explanation of the current Failure.
+
+Example:
+
+#+begin_src text
+ok> drop
+The stack is empty.
+no>
+
+no> why
+DROP requires one value, but the stack is empty.
+no>
+#+end_src
+
+The prompt stays =no>= because explaining a Failure does not resolve it.
+
+** No active Failure
+
+If no Failure exists:
+
+#+begin_src text
+ok> why
+because it worked.
+ok>
+#+end_src
+
+A small repeated joke may remain:
+
+#+begin_src text
+ok> why
+because it worked.
+ok> why
+because it worked.
+ok> why
+because it worked; what else did you expect?
+ok>
+#+end_src
+
+Any unrelated interaction may reset the repetition count.
+
+* =which=
+
+=which= exposes values related to the current Failure.
+
+Example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> which
+no> .s
+<1> { 81 104 }
+no>
+#+end_src
+
+This design deliberately prefers real Jird values over prose-only diagnostics.
+
+The user may continue:
+
+#+begin_src text
+no> [ terminate-graceful ] map
+ok>
+#+end_src
+
+if those values were already on the stack.
+
+Or:
+
+#+begin_src text
+no> which [ terminate-graceful ] map
+ok>
+#+end_src
+
+in one expression.
+
+* =?= and plans
+
+Jird may use =?= to produce a recovery quotation from the active Failure.
+
+MICE presents the result but does not invent a second action language.
+
+Example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> ?
+A recovery exists.
+no>
+
+no> .s
+<1> [
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+no>
+#+end_src
+
+The Failure remains because merely computing the plan does not change the world.
+
+If the quotation is run and the resolution condition is satisfied, the Failure
+may disappear.
+
+* Undefined and malformed commands
+
+MICE should distinguish:
+
+- name not found;
+- source exists but cannot load;
+- source loads but does not define the advertised name;
+- command loads correctly but execution fails.
+
+Examples:
+
+#+begin_src text
+ok> nutria
+The name "nutria" is not defined.
+no>
+#+end_src
+
+and:
+
+#+begin_src text
+The script "vole.jrd" did not define "vole".
+#+end_src
+
+The resulting Failure should preserve enough structure for =why= and, where useful,
+=which=.
+
+* Introspection
+
+Important interactive facilities include:
+
+#+begin_src text
+how
+effect
+lookup
+why
+which
+#+end_src
+
+=lookup= is core Jird.
+
+The others may be MICE-provided or standard Jird source.
+
+User-visible behavior matters more than implementation placement.
+
+* =how=
+
+Example primitive:
+
+#+begin_src text
+ok> "dup" how
+DUP is a primitive.
+It duplicates the value at the top of the data stack.
+Its stack effect is ( A -- A A ).
+ok>
+#+end_src
+
+Example source-defined word:
+
+#+begin_src text
+ok> "weight" how
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+Its declared stack effect is ( Path -- Int ).
+Returns the combined size of the immediate children.
+ok>
+#+end_src
+
+The phrase "declared stack effect" matters because Jird does not statically verify
+it.
+
+** ="how" how=
+
+A small self-reference is retained:
+
+#+begin_src text
+ok> "how" how
+You already know this.
+If you do not know, HOW describes the value bound to a name.
+Primitive words are described in plain language.
+Defined words are displayed in their canonical form.
+ok>
+#+end_src
+
+* =effect=
+
+=effect= displays metadata.
+
+#+begin_src text
+ok> "weight" effect
+( Path -- Int )
+ok>
+#+end_src
+
+If no effect is declared:
+
+#+begin_src text
+ok> "vole" effect
+No stack effect has been declared for "vole".
+ok>
+#+end_src
+
+This is introspection, not type checking.
+
+* Response style
+
+MICE speaks in restrained, complete English.
+
+** Normal success is quiet
+
+Example:
+
+#+begin_src text
+ok> [ dup * ] "hamster" define
+ok>
+#+end_src
+
+No success banner is required.
+
+** Errors are complete sentences
+
+Prefer:
+
+#+begin_src text
+The stack is empty.
+The file does not exist.
+The target is busy.
+The process has been terminated.
+#+end_src
+
+Avoid decorative or emotional diagnostics.
+
+** Technical names remain technical
+
+MICE should use exact terms such as:
+
+#+begin_src text
+sepc
+stval
+sstatus
+Sv32
+page table
+hart
+UART
+#+end_src
+
+where relevant.
+
+** Sparse humor
+
+Humor is allowed because it is rare.
+
+Examples:
+
+#+begin_src text
+Please don't.
+Okay, I warned you enough.
+I told you you would miss the primitives.
+because it worked; what else did you expect?
+#+end_src
+
+** Serious faults are never jokes
+
+Nested traps, memory corruption, or possible data-loss conditions are reported
+plainly.
+
+* =ranq=
+
+=ranq= may print an optional string with probability =1/N=.
+
+Example:
+
+#+begin_src text
+" Nice try." 10 ranq
+#+end_src
+
+It must never randomize whether an error is reported, technical diagnostic data,
+safety warnings, fault registers, or filesystem truth.
+
+Only harmless optional remarks may be randomized.
+
+* =fetch=
+
+=fetch= is a deliberately dry system-information command.
+
+Example:
+
+#+begin_src text
+ok> fetch
+
+[fancy schmancy ricing fetch]
+
+[I forgot to make the logo.]
+
+The operating system is chiOS, version 0.1.
+You could have asked VERSION.
+
+ok>
+#+end_src
+
+Possible placeholders include:
+
+#+begin_src text
+[insert attractive ASCII art here.]
+[I forgot to make the logo.]
+[a logo would normally be here.]
+[please imagine something visually impressive.]
+[decorative material omitted.]
+#+end_src
+
+=fetch= should preferably be ordinary Jird source when practical.
+
+* Boot transition
+
+MICE starts only after chiOS reaches a stable interactive state.
+
+Possible boot milestones include:
+
+- firmware entry;
+- hart selection;
+- kernel handoff;
+- FDT validation;
+- physical memory discovery;
+- allocator initialization;
+- page-table setup;
+- Sv32 activation;
+- trap initialization;
+- user-space initialization;
+- MICE startup.
+
+A deliberate transition may be:
+
+#+begin_src text
+The interactive environment is starting in 3...
+...2...
+...1...
+#+end_src
+
+On a video terminal, successful startup may then clear boot output and show:
+
+#+begin_src text
+chiOS/0.1
+MICE/0.1
+
+ok>
+#+end_src
+
+If startup fails, the diagnostic should remain visible.
+
+* Physical terminal
+
+MICE should remain usable on a slow paper-like terminal.
+
+A future setup may route UART output through a microcontroller to an electronic
+typewriter.
+
+Therefore MICE should not require cursor-addressed full-screen UI, rapid redraw,
+animation, or dense status panels.
+
+A plain sequential transcript is a first-class interface.
+
+This reinforces the preference for short output.
+
+* Serious traps
+
+Expected syscalls and timer interrupts should not produce terminal chatter.
+
+Unexpected user-process faults may be reported with:
+
+- process identifier;
+- fault class;
+- address;
+- attempted access;
+- =sepc=;
+- =stval=;
+- relevant registers;
+- final disposition.
+
+A nested trap during trap handling is serious.
+
+The established style is:
+
+#+begin_src text
+A second trap occurred while the first trap was being handled.
+The kernel state may no longer be reliable.
+No attempt will be made to resume execution.
+The system has been halted.
+Please reboot the system.
+#+end_src
+
+No joke or random suffix should be appended.
+
+* Representative full session
+
+#+begin_src text
+chiOS/0.1
+MICE/0.1
+
+ok> 2 3 + .
+5
+ok>
+
+ok> { 1 2 3 4 } [ dup * ] map .
+{ 1 4 9 16 }
+ok>
+
+ok> @:@ .
+path(@home mice Projects Jird@)
+ok>
+
+ok> @: rodents@ childs .
+{
+    path(@home mice Projects Jird rodents vole.txt@)
+    path(@home mice Projects Jird rodents jerboa.txt@)
+    path(@home mice Projects Jird rodents marmot.org@)
+}
+ok>
+
+ok> @: rodents@ childs [ size ] map 0 [ + ] fold .
+2407
+ok>
+
+ok> [ childs [ size ] map 0 [ + ] fold ] "weight" define
+ok>
+
+ok> @: rodents@ weight .
+2407
+ok>
+
+ok> 4096 alloc "burrow" define
+ok> 42 burrow store32
+ok> burrow load32 .
+42
+ok>
+
+ok> @: rodents nutria.txt@ exists? .
+no
+ok> why
+because it worked.
+ok>
+
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> why
+Two processes hold files open.
+no>
+
+no> which
+no> .s
+<1> { 81 104 }
+no>
+
+no> [ terminate-graceful ] map
+ok>
+
+ok> @mnt archive@ unmount
+ok>
+
+ok> [ drop ] "dup" define
+Please don't.
+no>
+
+no> why
+because you will probably want DUP later.
+no>
+
+no> [ drop ] "dup" define
+Okay, I warned you enough.
+ok>
+
+ok> @mice dups@ childs .
+{
+    path(@mice dups dup.jrd@)
+}
+ok>
+
+ok> 42 dup
+ok> .s
+<0>
+ok>
+
+ok> resp
+I told you you would miss the primitives.
+ok>
+
+ok> fetch
+
+[fancy schmancy ricing fetch]
+
+[please imagine something visually impressive.]
+
+The operating system is chiOS, version 0.1.
+You could have asked VERSION.
+
+ok>
+#+end_src
+
+* MICE versus Jird
+
+The boundary should remain simple.
+
+** Jird defines
+
+- literals;
+- stack behavior;
+- quotations;
+- =define= and rebinding;
+- Path;
+- Addr;
+- Failure;
+- =why= / =which= semantic meaning;
+- symbolic relations;
+- =?=;
+- planning.
+
+** MICE defines
+
+- =ok>= / =no>= presentation;
+- interactive transaction boundaries;
+- current-path hosting;
+- persistence;
+- command storage;
+- duplicate lookup;
+- primitive probation;
+- introspection presentation;
+- response style;
+- boot transition;
+- terminal behavior.
+
+Example:
+
+#+begin_src text
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+#+end_src
+
+is Jird.
+
+Persisting it as:
+
+#+begin_src text
+@mice commands weight.jrd@
+#+end_src
+
+is MICE.
+
+Example:
+
+#+begin_src text
+4096 alloc "burrow" define
+#+end_src
+
+is Jird.
+
+Deciding not to serialize =burrow= because Addr is ephemeral is MICE.
+
+* Implementation sketch
+
+This section is non-normative.
+
+** Major components
+
+#+begin_src text
+MICE
+|
++-- Jird evaluator
+|
++-- session wrapper
+|
++-- command index
+|
++-- duplicate index
+|
++-- source loader
+|
++-- transaction boundary
+|
++-- persistence policy
+|
+`-- terminal presentation
+#+end_src
+
+** Prompt rendering
+
+Prompt selection can remain trivial:
+
+#+begin_src text
+if session.failure exists
+    print "no>"
+else
+    print "ok>"
+#+end_src
+
+All intelligence belongs in Jird's Failure semantics.
+
+** Persistence classification
+
+A simple first implementation may classify bindings as:
+
+#+begin_src text
+persistable
+ephemeral
+#+end_src
+
+Addr is ephemeral by default.
+
+A quotation is persistable when its source representation is available.
+
+A stable Path may be persistable.
+
+The exact policy should be conservative.
+
+** Primitive metadata
+
+Builtin primitives may have metadata parallel to =.jrd= =&= metadata:
+
+- name;
+- description;
+- stack effect;
+- symbolic requirements;
+- symbolic effects.
+
+This supports =how=, =effect=, and planning.
+
+* Deliberate non-features
+
+** No second shell language
+
+MICE directly hosts Jird.
+
+** No full-screen requirement
+
+Line-oriented interaction is primary.
+
+** No chatty persona
+
+Short formal dialogue is sufficient.
+
+** No automatic execution of inferred plans
+
+Plans remain visible Jird quotations until explicitly executed.
+
+** No destructive overwrite requirement
+
+Duplicate definitions shadow originals through a separate layer.
+
+** No blind persistence
+
+Not every runtime binding is serializable.
+
+In particular, Addr is not automatically persisted.
+
+* Open questions
+
+** Exact persistence policy
+
+Should ordinary new quotation definitions be persisted automatically?
+
+Possible designs:
+
+- persistent by default;
+- transient by default;
+- persist stable values automatically and require explicit persistence for
+  ambiguous cases.
+
+** Editing existing user commands
+
+Should redefining an existing user command create a duplicate, update the original,
+or depend on an explicit editing mode?
+
+** General duplicate removal
+
+The exact relationship among =resp=, primitive restoration, and ordinary duplicate
+management remains open.
+
+** Accessing the original below a duplicate
+
+A clean user-facing mechanism may be useful.
+
+** Multiline prompt
+
+Incomplete quotations and lists need a secondary prompt.
+
+Its spelling is not yet designed.
+
+** History
+
+Command history should not be confused with symbolic reasoning history or Failure
+state.
+
+** Completion
+
+Name and Path completion would be useful on video terminals but must remain
+optional for physical terminals.
+
+** Failure history
+
+MICE currently needs only one active Failure.
+
+Keeping older discharged Failures for explicit inspection may later be useful, but
+should not complicate the initial design.
+
+* Compact summary
+
+#+begin_quote
+MICE is the standard interactive environment of chiOS.
+
+It hosts Jird directly and does not define a separate shell language.  The prompt
+reflects live Jird Failure state: =ok>= means that no unresolved Failure exists;
+=no>= means that one does.  Successful commands do not automatically clear the
+prompt.  A Failure disappears only when Jird determines that its resolution
+condition has become true or when the user explicitly discards it.
+
+Jird definitions may become persistent =.jrd= commands, but binding and persistence
+are separate concepts.  Stable source-defined commands may be stored under
+=@mice commands@=.  Existing names may be shadowed through =@mice dups@=, which is
+searched before originals.  Ephemeral runtime values such as Addr are not blindly
+serialized.
+
+MICE favors inspectable filesystem-backed state, concise technical diagnostics,
+line-oriented interaction, and sparse dry humor.
+#+end_quote
+
+Its most characteristic rules are:
+
+#+begin_src text
+dups first.
+original second.
+#+end_src
+
+and:
+
+#+begin_src text
+ok>    no unresolved Failure
+no>    unresolved Failure exists
+#+end_src

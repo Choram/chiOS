@@ -1,0 +1,243 @@
+#+title: <RISC-V ASSEMBLY REFERENCE>
+
+* Assembly
+** Registers
+RISC-V has 32 general-purpose integer registers, =x0= through =x31=.
+The ABI gives them conventional names according to their usual roles.
+
+| Register | ABI name | Role                          |
+|----------+----------+-------------------------------|
+| x0       | zero     | constant 0                    |
+| x1       | ra       | return address                |
+| x2       | sp       | stack pointer                 |
+| x3       | gp       | global pointer                |
+| x4       | tp       | thread pointer                |
+| x5-x7    | t0-t2    | temporary registers           |
+| x8       | s0 / fp  | saved register / frame pointer|
+| x9       | s1       | saved register                |
+| x10-x17  | a0-a7    | arguments / return values     |
+| x18-x27  | s2-s11   | saved registers               |
+| x28-x31  | t3-t6    | temporary registers           |
+
+*** Register Classes
+
+- =a0-a7= :: function arguments
+- =a0-a1= :: return values
+- =t0-t6= :: temporary, caller-saved
+- =s0-s11= :: preserved across function calls, callee-saved
+- =ra= :: return address
+- =sp= :: current stack pointer
+- =zero= :: always reads as 0; writes are discarded
+
+Caller-saved registers may be overwritten by a called function.
+Callee-saved registers must be restored before the function returns.
+
+*** Special Registers
+
+The program counter (=PC=) is not one of the 32 general-purpose
+registers. It contains the address of the currently executing instruction.
+
+CSRs (Control and Status Registers) are a separate register space used
+for architectural state such as privilege, traps, interrupts, and memory
+protection.
+
+Examples:
+- =mstatus= :: M-mode status and privilege state
+- =mepc= :: M-mode exception/return PC
+- =mhartid= :: hardware thread ID
+- =pmpcfgN= / =pmpaddrN= :: physical-memory protection
+- =sstatus= / =sepc= / =stvec= :: S-mode state
+
+** Convention
+- =rd <- x= : store x into rd
+- =M[a]= : memory at address a
+- =PC= : program counter
+
+** Move / Load / Store
+- =mv rd, rs= :: rd <- rs
+- =li rd, imm= :: rd <- imm
+- =la rd, sym= :: rd <- address(sym)
+
+- =lb rd, off(rs)= :: rd <- sign_extend(M[rs + off], 8)
+- =lbu rd, off(rs)= :: rd <- zero_extend(M[rs + off], 8)
+- =lh rd, off(rs)= :: rd <- sign_extend(M[rs + off], 16)
+- =lhu rd, off(rs)= :: rd <- zero_extend(M[rs + off], 16)
+- =lw rd, off(rs)= :: rd <- M[rs + off, 32]
+
+- =sb rs, off(base)= :: M[base + off, 8] <- rs[7:0]
+- =sh rs, off(base)= :: M[base + off, 16] <- rs[15:0]
+- =sw rs, off(base)= :: M[base + off, 32] <- rs
+
+** Arithmetic
+- =add rd, rs1, rs2= :: rd <- rs1 + rs2
+- =addi rd, rs, imm= :: rd <- rs + imm
+- =sub rd, rs1, rs2= :: rd <- rs1 - rs2
+
+** Bitwise
+- =and rd, rs1, rs2= :: rd <- rs1 & rs2
+- =andi rd, rs, imm= :: rd <- rs & imm
+- =or rd, rs1, rs2= :: rd <- rs1 | rs2
+- =ori rd, rs, imm= :: rd <- rs | imm
+- =xor rd, rs1, rs2= :: rd <- rs1 ^ rs2
+- =xori rd, rs, imm= :: rd <- rs ^ imm
+
+- =sll rd, rs1, rs2= :: rd <- rs1 << rs2
+- =slli rd, rs, imm= :: rd <- rs << imm
+- =srl rd, rs1, rs2= :: rd <- logical(rs1 >> rs2)
+- =srli rd, rs, imm= :: rd <- logical(rs >> imm)
+- =sra rd, rs1, rs2= :: rd <- arithmetic(rs1 >> rs2)
+- =srai rd, rs, imm= :: rd <- arithmetic(rs >> imm)
+
+** Comparison
+- =slt rd, rs1, rs2= :: rd <- (signed(rs1) < signed(rs2))
+- =sltu rd, rs1, rs2= :: rd <- (rs1 < rs2)
+- =slti rd, rs, imm= :: rd <- (signed(rs) < imm)
+- =sltiu rd, rs, imm= :: rd <- (rs < imm)
+
+** Branch
+- =beq rs1, rs2, L= :: if rs1 == rs2, PC <- L
+- =bne rs1, rs2, L= :: if rs1 != rs2, PC <- L
+- =blt rs1, rs2, L= :: if signed(rs1) < signed(rs2), PC <- L
+- =bge rs1, rs2, L= :: if signed(rs1) >= signed(rs2), PC <- L
+- =bltu rs1, rs2, L= :: if rs1 < rs2, PC <- L
+- =bgeu rs1, rs2, L= :: if rs1 >= rs2, PC <- L
+
+** Jump / Call
+- =j L= :: PC <- L
+- =jr rs= :: PC <- rs
+- =jal rd, L= :: rd <- PC + 4; PC <- L
+- =jalr rd, off(rs)= :: rd <- PC + 4; PC <- rs + off
+- =call f= :: ra <- return address; PC <- f
+- =ret= :: PC <- ra
+
+** CSR
+- =csrr rd, csr= :: rd <- CSR[csr]
+- =csrw csr, rs= :: CSR[csr] <- rs
+- =csrrw rd, csr, rs= :: rd <- old CSR; CSR <- rs
+- =csrrs rd, csr, rs= :: rd <- old CSR; CSR <- CSR | rs
+- =csrrc rd, csr, rs= :: rd <- old CSR; CSR <- CSR & ~rs
+
+** Privileged
+- =mret= :: privilege <- mstatus.MPP; PC <- mepc
+- =sret= :: privilege <- sstatus.SPP; PC <- sepc
+- =wfi= :: wait for interrupt
+- =sfence.vma= :: synchronize virtual-memory translation state
+- =ecall= :: raise environment-call exception
+- =ebreak= :: raise breakpoint exception
+
+* Linker
+A linker script decides where sections and symbols are placed in the
+final executable image.
+
+** Common Sections
+
+- =.text= :: executable code
+- =.rodata= :: read-only data
+- =.data= :: initialized writable data
+- =.bss= :: zero-initialized writable data
+
+** Location Counter
+
+=.=
+represents the current output address.
+
+- =. = 0x80200000;= :: move the current address to 0x80200000
+- =. = ALIGN(4096);= :: advance to the next 4096-byte boundary
+
+** Section Placement
+
+#+begin_src ld
+.text : {
+    *(.text .text.*)
+}
+#+end_src
+
+Collects matching input sections into the output =.text= section.
+
+** Symbols
+
+#+begin_src ld
+__kernel_start = .;
+__kernel_end = .;
+#+end_src
+
+Defines linker symbols whose values are addresses.
+
+They do not allocate memory by themselves.
+
+** Entry Point
+
+#+begin_src ld
+ENTRY(_start)
+#+end_src
+
+Sets the ELF entry point to the address of =_start=.
+
+** KEEP
+
+#+begin_src ld
+KEEP(*(.text.boot))
+#+end_src
+
+Prevents matching sections from being removed by linker garbage
+collection.
+
+** Useful Expressions
+- =ADDR(.text)= :: start address of a section
+- =SIZEOF(.text)= :: size of a section
+- =LOADADDR(.data)= :: load address of a section
+- =ALIGN(n)= :: next address aligned to n bytes
+
+* Build Target
+ARCH = rv32i_zicsr
+ABI  = ilp32
+
+** Architecture
+=rv32i_zicsr=
+
+- =rv32= :: 32-bit RISC-V; XLEN = 32.
+- =i= :: base integer instruction set.
+- =zicsr= :: CSR access instructions such as =csrr=, =csrw=, =csrrs=, and =csrrc=.
+
+Thus the target provides the RV32I base ISA plus CSR instructions.
+
+Extensions such as =M=, =A=, =F=, =D=, and =C= are not enabled.
+
+** ABI
+=ilp32=
+
+- int     :: 32 bits
+- long    :: 32 bits
+- pointer :: 32 bits
+
+The ABI also defines the register calling convention, stack layout, and
+how arguments and return values are passed.
+
+** Assemble
+#+begin_src sh
+riscv32-elf-as -march=$ARCH -mabi=$ABI firmware.s -o build/obj/firmware.o
+#+end_src
+
+- =-march=rv32i_zicsr= :: accept instructions from RV32I + Zicsr.
+- =-mabi=ilp32= :: mark the object as using the ILP32 ABI.
+- =firmware.s= :: assembly source.
+- =-o .../firmware.o= :: output relocatable ELF object.
+
+Result:
+
+firmware.s -> firmware.o
+
+** Link
+#+begin_src sh
+riscv32-elf-ld -m elf32lriscv -T linker_firmware.ld \
+    build/obj/firmware.o -o build/elf/firmware.elf
+#+end_src
+
+- =-m elf32lriscv= :: produce/link a 32-bit little-endian RISC-V ELF.
+- =-T linker_firmware.ld= :: use the specified linker script.
+- =firmware.o= :: input object.
+- =-o firmware.elf= :: final linked ELF output.
+
+Result:
+
+firmware.o + linker_firmware.ld -> firmware.elf

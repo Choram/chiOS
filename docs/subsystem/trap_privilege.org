@@ -1,0 +1,502 @@
+#+title: <TRAP / PRIVILEGE>
+
+* Purpose
+Trap and privilege handling forms the execution boundary between U-mode programs and the S-mode kernel.
+
+The subsystem preserves an interrupted U-mode execution context, establishes a safe kernel context, dispatches the trap to kernel code, and later restores an execution context with =sret=.
+
+The design is intentionally process-aware. Each U-mode execution context owns the state required to enter the kernel and to resume user execution, so that later process management and scheduling can reuse the same trap mechanism without redesigning the privilege boundary.
+
+Architectural RISC-V trap behavior, CSRs, delegation, and interrupt semantics are documented separately in: [[file:traps.org][Traps]]
+
+
+* Structure
+** Execution Context
+Each U-mode execution context owns:
+
+- a TrapFrame
+- a user stack
+- a kernel stack
+- mapped user code and data
+- the privilege state required for =sret=
+
+Conceptually:
+
+#+begin_example
+Process / Execution Context
+
+    User address space
+        user code
+        user data
+        user stack
+
+    Kernel-owned state
+        TrapFrame
+        kernel stack
+#+end_example
+
+The TrapFrame and kernel stack are kernel-owned and are not accessible from
+U-mode.
+
+
+** TrapFrame
+The TrapFrame contains both kernel-entry metadata and the saved U-mode CPU
+state.
+
+#+begin_example
+TrapFrame
++-------------------------+
+| kernel_sp               |
+| kernel_trap             |
++-------------------------+
+| sepc                    |
+| sstatus                 |
++-------------------------+
+| ra                      |
+| sp                      |
+| gp                      |
+| tp                      |
+| t0 ... t6               |
+| s0 ... s11              |
+| a0 ... a7               |
++-------------------------+
+#+end_example
+
+The first part is initialized by the kernel:
+
+- =kernel_sp= is the top of the kernel stack assigned to this execution
+  context.
+- =kernel_trap= is the kernel handler entered after the low-level assembly
+  entry has saved the interrupted state.
+
+The remaining fields describe the U-mode context that can later be restored:
+
+- =sepc= is the user PC restored before =sret=.
+- =sstatus= contains the privilege and interrupt state used for return.
+- the GPR fields contain the interrupted user registers.
+- the saved =sp= field is therefore the user stack pointer.
+
+=kernel_sp= and =kernel_trap= are persistent kernel metadata and are not
+overwritten when user register state is saved.
+
+The TrapFrame memory layout must exactly match the offsets used by the
+assembly save/restore code.
+
+
+** TrapFrame Representation
+A possible Zig representation is:
+
+#+begin_src zig
+pub const TrapFrame = extern struct {
+    kernel_sp: usize,
+    kernel_trap: usize,
+
+    sepc: usize,
+    sstatus: usize,
+
+    ra: usize,
+    sp: usize,
+    gp: usize,
+    tp: usize,
+
+    t0: usize,
+    t1: usize,
+    t2: usize,
+
+    s0: usize,
+    s1: usize,
+
+    a0: usize,
+    a1: usize,
+    a2: usize,
+    a3: usize,
+    a4: usize,
+    a5: usize,
+    a6: usize,
+    a7: usize,
+
+    s2: usize,
+    s3: usize,
+    s4: usize,
+    s5: usize,
+    s6: usize,
+    s7: usize,
+    s8: usize,
+    s9: usize,
+    s10: usize,
+    s11: usize,
+
+    t3: usize,
+    t4: usize,
+    t5: usize,
+    t6: usize,
+};
+#+end_src
+
+The exact order is an ABI between Zig and the trap-entry assembly and must not
+be changed independently on either side.
+
+
+** sscratch Convention
+While U-mode is executing:
+
+#+begin_example
+sp       = user stack pointer
+sscratch = current TrapFrame pointer
+#+end_example
+
+Thus =sscratch= acts as the kernel's handle to the currently executing user
+context.
+
+#+begin_example
+sscratch
+    |
+    v
+TrapFrame
+    |
+    +-- kernel_sp
+    +-- kernel_trap
+    +-- saved user state
+#+end_example
+
+When a U-mode trap occurs, the assembly entry can obtain the TrapFrame before
+depending on any user-controlled memory.
+
+From the TrapFrame it can determine:
+
+- where the user registers must be saved
+- which kernel stack must be used
+- which kernel trap handler must be entered
+
+The architectural =sscratch= CSR has no inherent TrapFrame semantics; this is
+a kernel convention.
+
+
+** Kernel Stack
+Each execution context has its own kernel stack.
+
+#+begin_example
+Process A
+    user stack A
+    kernel stack A
+
+Process B
+    user stack B
+    kernel stack B
+#+end_example
+
+While U-mode is running:
+
+#+begin_example
+sp = user_sp
+#+end_example
+
+After trap entry:
+
+#+begin_example
+sp = TrapFrame.kernel_sp
+#+end_example
+
+Kernel trap handling therefore never uses the user stack as its working stack.
+
+This also allows multiple processes to have independent in-kernel execution
+state later.
+
+
+** Trap Entry
+All S-mode traps initially enter through a common assembly entry installed in
+=stvec=.
+
+For a U-mode trap, the low-level entry is responsible for:
+
+- obtaining the current TrapFrame from =sscratch=
+- preserving all interrupted user GPRs
+- saving =sepc= and =sstatus=
+- switching to =TrapFrame.kernel_sp=
+- transferring control to =TrapFrame.kernel_trap=
+
+The assembly entry performs only the minimum machine-state manipulation
+required before ordinary kernel code can safely run.
+
+Trap policy and cause-specific handling remain in Zig.
+
+
+** Trap Dispatch
+=kernel_trap= identifies the kernel-level trap dispatcher.
+
+Initially every execution context may contain the same dispatcher address:
+
+#+begin_example
+TrapFrame.kernel_trap -> trapDispatch
+#+end_example
+
+Keeping the target in the TrapFrame nevertheless keeps the low-level trap
+entry independent of a fixed high-level handler.
+
+The dispatcher receives the current TrapFrame and trap information.
+
+Conceptually:
+
+#+begin_example
+trapDispatch(
+    trap_frame,
+    scause,
+    stval,
+)
+#+end_example
+
+=scause= and =stval= describe the current trap but are not part of the
+persistent resumable CPU context, so they do not need to be stored permanently
+inside the TrapFrame.
+
+The dispatcher may later handle:
+
+- page faults
+- illegal or unexpected exceptions
+- U-mode =ecall=
+- timer interrupts
+- external interrupts
+
+
+** Trap Exit
+Returning to U-mode performs the reverse transformation.
+
+The exit path:
+
+- restores =sepc=
+- restores the required =sstatus= state
+- prepares =sscratch= to identify the current TrapFrame again
+- restores all saved user GPRs
+- restores the user =sp=
+- executes =sret=
+
+After =sret=:
+
+#+begin_example
+PC = TrapFrame.sepc
+sp = TrapFrame.sp
+privilege = U-mode
+#+end_example
+
+The same exit mechanism is used both for returning from an ordinary trap and
+for the initial entry into a newly constructed U-mode context.
+
+
+** Initial U-mode Context
+A new U-mode context is created by constructing a TrapFrame as though the
+process had previously trapped and were now ready to resume.
+
+At minimum the kernel initializes:
+
+#+begin_example
+kernel_sp
+kernel_trap
+
+sepc       = user entry address
+sstatus    = return-to-U state
+sp         = user stack top
+#+end_example
+
+Other GPRs are initialized as required.
+
+The kernel then restores this prepared TrapFrame and executes =sret=.
+
+This makes initial process entry and later process resumption use the same
+representation.
+
+
+** S-mode Traps
+The U-mode trap path cannot blindly assume that every trap originated from
+U-mode.
+
+A trap may also occur while the kernel itself is already executing in S-mode.
+
+In that case:
+
+- =sp= already refers to a kernel stack
+- the user-to-kernel stack transition must not be repeated
+- the U-mode =sscratch= convention cannot be applied blindly
+
+The common trap entry therefore distinguishes the previous privilege level
+before selecting the appropriate entry path.
+
+Initially, unexpected S-mode exceptions may use a simpler diagnostic path,
+while the full TrapFrame path is used for U-mode contexts.
+
+
+** Future Process Structure
+The later process abstraction can directly own the structures prepared here.
+
+Conceptually:
+
+#+begin_example
+Process
+    address_space
+    TrapFrame
+    kernel_stack
+    Context
+    state
+    pid
+    ...
+#+end_example
+
+The TrapFrame represents the user-side execution state across the U-mode /
+S-mode boundary.
+
+A separate scheduler =Context= will later represent kernel-side execution
+state used during context switches.
+
+These serve different purposes:
+
+#+begin_example
+TrapFrame
+    "Where was this process executing in U-mode?"
+
+Context
+    "Where should this process resume inside the kernel?"
+#+end_example
+
+A scheduler context therefore does not replace the TrapFrame.
+
+
+** Scheduler Interaction
+Once scheduling exists, a trap does not necessarily return to the process
+that caused it.
+
+For example:
+
+#+begin_example
+U-mode Process A
+        |
+        | timer trap
+        v
+save A.TrapFrame
+        |
+        v
+kernel
+        |
+        v
+scheduler
+        |
+        | choose B
+        v
+restore B execution state
+        |
+        v
+sret
+        |
+        v
+U-mode Process B
+#+end_example
+
+The process selected for return determines which TrapFrame becomes current
+and which TrapFrame address is written to =sscratch=.
+
+This is why the trap state is associated with an execution context rather
+than treated as temporary global storage.
+
+
+** Address-Space Assumption
+The current design does not store a separate =kernel_satp= in the TrapFrame.
+
+The active address space keeps the mappings required by the S-mode kernel
+accessible while U-mode executes, so trap entry does not currently require a
+page-table switch.
+
+If user and kernel page tables are separated more strictly later,
+kernel-address-space information can be added to the trap-entry metadata
+without changing the basic TrapFrame model.
+
+
+* Operation
+1. Install the common S-mode assembly trap entry in =stvec=.
+
+2. Allocate or prepare a kernel stack for the U-mode execution context.
+
+3. Allocate or initialize a kernel-owned TrapFrame for the execution context.
+
+4. Store the kernel stack top in =TrapFrame.kernel_sp=.
+
+5. Store the kernel trap dispatcher address in =TrapFrame.kernel_trap=.
+
+6. Initialize =TrapFrame.sepc= with the U-mode entry address.
+
+7. Initialize =TrapFrame.sstatus= so that =sret= enters U-mode with the
+   intended interrupt state.
+
+8. Initialize the saved user GPRs, including the user stack pointer in
+   =TrapFrame.sp=.
+
+9. Write the TrapFrame address to =sscratch=.
+
+10. Restore the prepared user register state from the TrapFrame.
+
+11. Load the prepared =sepc= and =sstatus= state.
+
+12. Execute =sret= and begin U-mode execution.
+
+13. When a trap occurs, hardware records the architectural trap state and
+    transfers control to =stvec=.
+
+14. Determine whether the interrupted context was U-mode or S-mode.
+
+15. For a U-mode trap, obtain the current TrapFrame through =sscratch=.
+
+16. Preserve every interrupted user GPR in the TrapFrame without overwriting
+    =kernel_sp= or =kernel_trap=.
+
+17. Save =sepc= and the required =sstatus= state in the TrapFrame.
+
+18. Load =TrapFrame.kernel_sp= and switch to the execution context's kernel
+    stack.
+
+19. Read the transient trap information such as =scause= and =stval=.
+
+20. Transfer control to =TrapFrame.kernel_trap=, passing the TrapFrame and
+    trap information to the kernel dispatcher.
+
+21. The dispatcher performs the required kernel operation and may modify the
+    saved execution state.
+
+22. If the process should resume, return to the common trap-exit path.
+
+23. If scheduling selects another process, select that process's TrapFrame
+    instead before entering the trap-exit path.
+
+24. Restore =sepc= and =sstatus= from the TrapFrame selected for execution.
+
+25. Set =sscratch= to the TrapFrame that will own the resumed U-mode context.
+
+26. Restore all saved user GPRs, including the user stack pointer.
+
+27. Execute =sret=.
+
+28. Resume the selected U-mode execution context.
+
+
+* Invariants
+- Each U-mode execution context has its own kernel-owned TrapFrame.
+- Each U-mode execution context has a valid kernel stack before it is run.
+- =TrapFrame.kernel_sp= always identifies the correct kernel stack for that
+  execution context.
+- =TrapFrame.kernel_trap= always identifies a valid kernel trap handler.
+- Kernel-entry metadata is not overwritten while user state is saved.
+- The TrapFrame layout exactly matches the assembly save/restore offsets.
+- While U-mode executes, =sscratch= identifies the currently executing
+  TrapFrame.
+- The saved =sp= field represents the U-mode stack pointer.
+- Kernel trap handling does not use the user stack.
+- All user register state required for transparent resumption is preserved.
+- =sepc= and =sstatus= in the selected TrapFrame describe the context that
+  will be resumed by =sret=.
+- U-mode and S-mode trap entry paths do not incorrectly apply each other's
+  stack-switching conventions.
+- A scheduler may choose a different TrapFrame for return without changing
+  the trap-entry representation.
+- TrapFrame state and later scheduler Context state remain logically distinct.
+
+
+* Notes
+** Gotchas
+
+** Decisions

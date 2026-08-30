@@ -1,0 +1,775 @@
+#+title: <TRAP>
+
+* Purpose
+A trap transfers control from normal execution to a privileged trap handler.
+
+RISC-V uses the same mechanism for two kinds of events:
+
+- exceptions: synchronous events caused by the current instruction
+- interrupts: asynchronous events generated independently of the current instruction
+
+Machine mode and Supervisor mode provide parallel trap mechanisms.
+
+The trap subsystem is responsible for:
+
+- selecting a trap handler
+- recording the cause and faulting execution state
+- delegating appropriate traps from M-mode to S-mode
+- preserving interrupted register state in software
+- dispatching exceptions and interrupts
+- returning to the interrupted context
+
+
+* Structure
+** Trap Interface
+M-mode and S-mode use parallel sets of trap CSRs.
+
+| Purpose               | M-mode     | S-mode     |
+|-----------------------+------------+------------|
+| trap vector           | =mtvec=    | =stvec=    |
+| cause                 | =mcause=   | =scause=   |
+| exception PC          | =mepc=     | =sepc=     |
+| additional trap value | =mtval=    | =stval=    |
+| scratch register      | =mscratch= | =sscratch= |
+| status                | =mstatus=  | =sstatus=  |
+| interrupt enable      | =mie=      | =sie=      |
+| interrupt pending     | =mip=      | =sip=      |
+| return instruction    | =mret=     | =sret=     |
+
+M-mode additionally controls delegation through:
+
+| CSR       | Purpose                         |
+|-----------+---------------------------------|
+| =medeleg= | delegate synchronous exceptions |
+| =mideleg= | delegate interrupts             |
+
+
+** Exceptions and Interrupts
+An exception is synchronous with instruction execution.
+
+Examples:
+
+- illegal instruction
+- =ecall=
+- breakpoint
+- page fault
+- misaligned memory access
+
+An interrupt is asynchronous.
+
+Examples:
+
+- timer interrupt
+- software interrupt
+- external-device interrupt
+
+Both eventually use the same trap machinery:
+
+#+begin_example
+event
+  |
+  v
+cause selection
+  |
+  v
+privilege/delegation decision
+  |
+  v
+xepc / xcause / xtval / xstatus update
+  |
+  v
+xvec
+  |
+  v
+trap handler
+#+end_example
+
+
+** Trap Vector
+=mtvec= and =stvec= specify where trap execution begins.
+
+Their general layout is:
+
+#+begin_example
+XLEN-1                         2 1       0
++------------------------------+---------+
+|            BASE              |  MODE   |
++------------------------------+---------+
+#+end_example
+
+The low two bits contain =MODE=.
+
+| MODE | Meaning  |
+|------+----------|
+|    0 | Direct   |
+|    1 | Vectored |
+
+In Direct mode:
+
+#+begin_example
+PC <- BASE
+#+end_example
+
+for both exceptions and interrupts.
+
+In Vectored mode:
+
+#+begin_example
+exception:
+PC <- BASE
+
+interrupt:
+PC <- BASE + 4 * cause
+#+end_example
+
+Thus each interrupt gets a 4-byte vector slot.
+
+A minimal kernel normally starts with Direct mode and uses one common trap
+entry routine.
+
+
+** Cause
+=mcause= and =scause= identify the trap.
+
+On RV32:
+
+#+begin_example
+31                              0
++---+----------------------------+
+| I |         cause code         |
++---+----------------------------+
+#+end_example
+
+Bit 31 distinguishes interrupts from exceptions.
+
+#+begin_example
+bit 31 = 0 -> exception
+bit 31 = 1 -> interrupt
+#+end_example
+
+The remaining bits contain the cause code.
+
+
+** Exception Causes
+Common synchronous exception codes include:
+
+| Cause | Meaning                        |
+|-------+--------------------------------|
+|     0 | instruction address misaligned |
+|     1 | instruction access fault       |
+|     2 | illegal instruction            |
+|     3 | breakpoint                     |
+|     4 | load address misaligned        |
+|     5 | load access fault              |
+|     6 | store/AMO address misaligned   |
+|     7 | store/AMO access fault         |
+|     8 | environment call from U-mode   |
+|     9 | environment call from S-mode   |
+|    11 | environment call from M-mode   |
+|    12 | instruction page fault         |
+|    13 | load page fault                |
+|    15 | store/AMO page fault           |
+
+For an exception:
+
+#+begin_example
+mcause/scause interrupt bit = 0
+mcause/scause code          = exception number
+#+end_example
+
+
+** Interrupt Causes
+Standard interrupt cause numbers include:
+
+| Cause | Name | Meaning                       |
+|-------+------+-------------------------------|
+|     1 | SSI  | supervisor software interrupt |
+|     3 | MSI  | machine software interrupt    |
+|     5 | STI  | supervisor timer interrupt    |
+|     7 | MTI  | machine timer interrupt       |
+|     9 | SEI  | supervisor external interrupt |
+|    11 | MEI  | machine external interrupt    |
+
+For example, an S-mode timer interrupt has:
+
+#+begin_example
+scause =
+    0x80000000
+    | 5
+#+end_example
+
+The high bit indicates an interrupt and the lower bits identify the source.
+
+
+** Exception PC
+=mepc= and =sepc= store the execution address associated with a trap.
+
+For a synchronous exception they normally identify the instruction whose
+execution caused the exception.
+
+For example:
+
+#+begin_example
+sepc -> ECALL instruction
+#+end_example
+
+A handler may modify =sepc= before returning.
+
+For a system call, execution normally needs to continue after the =ecall=
+instruction rather than executing it again.
+
+With the current RV32I instruction set:
+
+#+begin_example
+sepc <- sepc + 4
+#+end_example
+
+before =sret=.
+
+
+** Trap Value
+=mtval= and =stval= provide additional information associated with a trap.
+
+Their interpretation depends on =mcause/scause=.
+
+Common examples:
+
+| Trap                      | =xtval= value            |
+|---------------------------+--------------------------|
+| instruction page fault    | faulting virtual address |
+| load page fault           | faulting virtual address |
+| store page fault          | faulting virtual address |
+| address fault             | faulting address         |
+| some illegal instructions | instruction information  |
+
+For traps without additional information, =xtval= may be zero.
+
+Therefore =xtval= should always be interpreted together with =xcause=.
+
+
+** Scratch CSR
+=mscratch= and =sscratch= are one-XLEN-word scratch registers reserved for
+software use.
+
+On RV32 each stores one 32-bit value.
+
+Hardware does not automatically save anything into them when a trap occurs.
+
+They may contain any value chosen by the firmware or kernel, commonly:
+
+- a kernel stack pointer
+- a pointer to a per-hart structure
+- a pointer to a TrapFrame
+- temporary trap-entry state
+
+A common U-mode to S-mode convention is to keep a kernel stack pointer in
+=sscratch= while user code is executing.
+
+When a trap arrives, the current =sp= still points to the user stack.
+
+The entry code can exchange it with =sscratch=:
+
+#+begin_src asm
+csrrw sp, sscratch, sp
+#+end_src
+
+Before the instruction:
+
+#+begin_example
+sp       = user stack
+sscratch = kernel stack
+#+end_example
+
+afterwards:
+
+#+begin_example
+sp       = kernel stack
+sscratch = user stack
+#+end_example
+
+The handler can now safely create its TrapFrame on the kernel stack.
+
+Before returning to U-mode, the values can be exchanged again.
+
+This is only a software convention; RISC-V assigns no intrinsic stack
+semantics to =sscratch= or =mscratch=.
+
+
+** Trap Status
+Trap entry modifies fields in =mstatus= or =sstatus= to remember the previous
+privilege and interrupt state.
+
+For M-mode:
+
+| Field |  Bits | Meaning                  |
+|-------+-------+--------------------------|
+| MIE   |     3 | machine interrupt enable |
+| MPIE  |     7 | previous value of =MIE=  |
+| MPP   | 12:11 | previous privilege mode  |
+
+For S-mode:
+
+| Field | Bits | Meaning                     |
+|-------+------+-----------------------------|
+| SIE   |    1 | supervisor interrupt enable |
+| SPIE  |    5 | previous value of =SIE=     |
+| SPP   |    8 | previous privilege mode     |
+
+=SPP= is:
+
+| SPP | Previous privilege |
+|-----+--------------------|
+|   0 | U-mode             |
+|   1 | S-mode             |
+
+When a trap is taken into S-mode, hardware conceptually performs:
+
+#+begin_example
+SPIE <- SIE
+SIE  <- 0
+SPP  <- previous privilege
+#+end_example
+
+For M-mode:
+
+#+begin_example
+MPIE <- MIE
+MIE  <- 0
+MPP  <- previous privilege
+#+end_example
+
+Disabling the corresponding global interrupt-enable bit prevents an ordinary
+same-level interrupt from immediately interrupting the trap-entry sequence.
+
+
+** Interrupt Enable
+Interrupt delivery is controlled at several levels.
+
+There are three distinct concepts:
+
+#+begin_example
+pending
+   +
+per-source enabled
+   +
+globally enabled
+   |
+   v
+interrupt may be taken
+#+end_example
+
+=mip/sip= represent pending interrupt state.
+
+=mie/sie= contain per-interrupt enable bits.
+
+=mstatus.MIE= and =sstatus.SIE= provide global interrupt enable controls.
+
+
+** Machine Interrupt Enable and Pending
+Common =mie= bits are:
+
+| Bit | Field | Meaning                       |
+|-----+-------+-------------------------------|
+|   1 | SSIE  | supervisor software interrupt |
+|   3 | MSIE  | machine software interrupt    |
+|   5 | STIE  | supervisor timer interrupt    |
+|   7 | MTIE  | machine timer interrupt       |
+|   9 | SEIE  | supervisor external interrupt |
+|  11 | MEIE  | machine external interrupt    |
+
+=mip= contains the corresponding pending bits:
+
+| Bit | Field | Meaning                     |
+|-----+-------+-----------------------------|
+|   1 | SSIP  | supervisor software pending |
+|   3 | MSIP  | machine software pending    |
+|   5 | STIP  | supervisor timer pending    |
+|   7 | MTIP  | machine timer pending       |
+|   9 | SEIP  | supervisor external pending |
+|  11 | MEIP  | machine external pending    |
+
+Whether a particular pending bit can be directly modified by software depends
+on the interrupt source and implementation.
+
+
+** Supervisor Interrupt Enable and Pending
+=sie= and =sip= provide the S-mode-visible interrupt interface.
+
+Common fields are:
+
+| Bit | =sie= | =sip= | Meaning            |
+|-----+-------+-------+--------------------|
+|   1 | SSIE  | SSIP  | software interrupt |
+|   5 | STIE  | STIP  | timer interrupt    |
+|   9 | SEIE  | SEIP  | external interrupt |
+
+These registers expose supervisor-level interrupt state permitted by the
+machine-level delegation configuration.
+
+For a supervisor interrupt to be taken while executing in S-mode, the
+relevant source must normally be:
+
+#+begin_example
+pending in sip
+enabled in sie
+and
+sstatus.SIE = 1
+#+end_example
+
+
+** Interrupt Delegation
+=mideleg= determines which interrupt causes are delegated from M-mode to
+S-mode.
+
+Each bit corresponds to an interrupt cause number.
+
+For example:
+
+#+begin_example
+mideleg[5] = 1
+#+end_example
+
+delegates the supervisor timer interrupt cause to S-mode.
+
+The corresponding S-mode interrupt may then be controlled through =sie= and
+observed through =sip=.
+
+Delegation decides which privilege level owns the trap.
+
+It does not itself create, enable, or acknowledge the interrupt.
+
+
+** Exception Delegation
+=medeleg= performs the corresponding operation for synchronous exceptions.
+
+Each bit corresponds to an exception cause.
+
+For example:
+
+#+begin_example
+medeleg[13] = 1
+#+end_example
+
+delegates load page faults to S-mode.
+
+For page-fault handling the firmware may delegate:
+
+#+begin_example
+12  instruction page fault
+13  load page fault
+15  store/AMO page fault
+#+end_example
+
+A delegated exception occurring below M-mode enters =stvec= rather than
+=mtvec=.
+
+A trap generated while executing in M-mode is never delegated to a less
+privileged mode.
+
+
+** Hardware Trap Entry
+When a trap is taken into S-mode, hardware automatically performs the
+privileged-state transition.
+
+Conceptually:
+
+1. Determine that the trap targets S-mode.
+2. Save the relevant PC in =sepc=.
+3. Write the trap cause to =scause=.
+4. Write additional trap information to =stval=.
+5. Save the previous interrupt state in =SPIE=.
+6. Clear =SIE=.
+7. Record the previous privilege in =SPP=.
+8. Set =PC= from =stvec=.
+
+The corresponding M-mode process uses:
+
+#+begin_example
+mepc
+mcause
+mtval
+MPIE
+MIE
+MPP
+mtvec
+#+end_example
+
+Hardware does /not/ automatically save general-purpose registers.
+
+In particular, registers such as:
+
+#+begin_example
+ra
+sp
+gp
+tp
+t0-t6
+s0-s11
+a0-a7
+#+end_example
+
+remain whatever they contained at the instant of the trap.
+
+
+** TrapFrame
+Because general-purpose registers are not automatically saved, trap-entry
+assembly normally creates a software TrapFrame.
+
+A typical TrapFrame stores:
+
+- general-purpose registers
+- interrupted =sp=
+- =sepc=
+- optionally =sstatus=
+- other kernel-specific state
+
+For an asynchronous interrupt, the interrupted instruction can occur at
+almost any point in normal execution.
+
+Therefore ordinary ABI caller-saved/callee-saved assumptions are insufficient
+for transparent trap handling.
+
+The trap entry must preserve every register whose original value will be
+needed when execution resumes.
+
+A simple kernel may save all general-purpose registers except =x0=.
+
+
+** Trap Return
+=mret= returns from an M-mode trap.
+
+Conceptually:
+
+#+begin_example
+privilege <- MPP
+PC        <- mepc
+
+MIE       <- MPIE
+MPIE      <- 1
+#+end_example
+
+=sret= performs the S-mode counterpart:
+
+#+begin_example
+privilege <- SPP
+PC        <- sepc
+
+SIE       <- SPIE
+SPIE      <- 1
+#+end_example
+
+The privilege bookkeeping field is also reset by the architecture as part of
+the return operation.
+
+=xret= does not restore general-purpose registers.
+
+The trap handler must restore its TrapFrame before executing =mret= or =sret=.
+
+
+** Typical Trap Paths
+A non-delegated S-mode exception follows:
+
+#+begin_example
+S-mode
+   |
+   | exception
+   v
+M-mode trap
+   |
+   +-> mepc
+   +-> mcause
+   +-> mtval
+   |
+   v
+mtvec
+#+end_example
+
+A delegated S-mode exception follows:
+
+#+begin_example
+S-mode
+   |
+   | exception
+   | medeleg[cause] = 1
+   v
+S-mode trap
+   |
+   +-> sepc
+   +-> scause
+   +-> stval
+   |
+   v
+stvec
+#+end_example
+
+A U-mode system call normally follows:
+
+#+begin_example
+U-mode
+   |
+   | ecall
+   | medeleg[8] = 1
+   v
+S-mode
+   |
+   +-> scause = 8
+   +-> sepc   = ECALL address
+   v
+stvec
+#+end_example
+
+
+* Operation
+1. During firmware initialization, install a minimal M-mode trap entry.
+
+   #+begin_src asm
+   la   t0, machine_trap
+   csrw mtvec, t0
+   #+end_src
+
+2. Initialize =mscratch= if the M-mode trap entry requires a dedicated stack,
+   TrapFrame, or per-hart context.
+
+3. Configure =medeleg= for synchronous exceptions that the S-mode kernel will
+   own.
+
+   For example, page faults may be delegated using causes 12, 13, and 15.
+
+4. Configure =mideleg= for supervisor-level interrupts that should be handled
+   by the S-mode kernel.
+
+5. Enter S-mode using the normal firmware =mret= transition.
+
+6. During kernel initialization, install the S-mode trap vector.
+
+   #+begin_src asm
+   la   t0, supervisor_trap
+   csrw stvec, t0
+   #+end_src
+
+7. Initialize =sscratch= according to the kernel trap-entry convention.
+
+   For later U-mode execution it may contain a kernel stack pointer or a
+   pointer to per-hart trap state.
+
+8. Keep interrupts disabled while the trap subsystem and interrupt sources
+   are being initialized.
+
+9. Enable individual S-mode interrupt sources through =sie= as their handlers
+   become ready.
+
+   For example:
+
+   #+begin_example
+   STIE -> timer interrupts
+   SEIE -> external interrupts
+   SSIE -> software interrupts
+   #+end_example
+
+10. Enable S-mode interrupt delivery globally by setting =sstatus.SIE= only
+    after the corresponding trap handlers are ready.
+
+11. When an exception or interrupt occurs, hardware chooses the target
+    privilege level according to the current mode and delegation state.
+
+12. Hardware writes =xepc=, =xcause=, =xtval= and the relevant =xstatus=
+    bookkeeping fields, then transfers execution to =xvec=.
+
+13. The assembly trap entry establishes a safe kernel context.
+
+    If the interrupted context may be U-mode, =sscratch= can be used to switch
+    away from the user stack before ordinary memory accesses are performed.
+
+14. Save the required general-purpose registers into a TrapFrame.
+
+15. Read =xcause= and first distinguish an exception from an interrupt using
+    the high interrupt bit.
+
+16. For an exception, dispatch using the exception cause number.
+
+    Examples:
+
+    #+begin_example
+    2   illegal instruction
+    8   U-mode ECALL
+    12  instruction page fault
+    13  load page fault
+    15  store page fault
+    #+end_example
+
+17. For an interrupt, dispatch using the interrupt cause number.
+
+    Examples:
+
+    #+begin_example
+    1   supervisor software
+    5   supervisor timer
+    9   supervisor external
+    #+end_example
+
+18. Handle or acknowledge the underlying event.
+
+    An interrupt source usually remains pending until the responsible device
+    or interrupt controller is acknowledged or reprogrammed.
+
+    Merely entering the trap handler does not necessarily clear the source.
+
+19. If the trap is an exception, inspect =xtval= when that exception defines
+    useful auxiliary information.
+
+    For a page fault:
+
+    #+begin_example
+    scause -> access type
+    stval  -> faulting virtual address
+    sepc   -> faulting instruction
+    #+end_example
+
+20. Modify =xepc= when execution must resume somewhere other than the original
+    trapped instruction.
+
+    An =ecall= handler, for example, advances =sepc= past the =ecall=.
+
+21. Restore the software-saved general-purpose registers from the TrapFrame.
+
+22. Restore any stack or context exchanged through =sscratch/mscratch=.
+
+23. Execute the appropriate trap-return instruction.
+
+    #+begin_example
+    M-mode -> mret
+    S-mode -> sret
+    #+end_example
+
+24. =xret= restores the privilege and interrupt-enable state recorded during
+    trap entry and resumes execution at =xepc=.
+
+
+* Invariants
+
+- =mtvec= points to a valid M-mode trap entry before M-mode traps are relied on.
+- =stvec= points to a valid S-mode trap entry before S-mode traps are relied on.
+- =mscratch= and =sscratch= are interpreted only according to the software
+  convention currently in use.
+- General-purpose registers required by the interrupted context are preserved
+  by software.
+- =xcause= is inspected before interpreting =xtval=.
+- Exceptions and interrupts are distinguished using the interrupt bit of
+  =xcause=.
+- =xepc= is modified only when execution must resume at a different
+  instruction.
+- Interrupt sources are enabled only after their handlers are ready.
+- Interrupt handlers acknowledge or otherwise clear their underlying source
+  before returning when required.
+- Delegated traps are handled by the intended lower privilege level.
+- Traps originating in M-mode are never delegated downward.
+- =mret= and =sret= are executed only after the corresponding trap context has
+  been restored.
+
+
+* Notes
+** Gotchas
+- Enabling an individual interrupt source is not sufficient; the corresponding global interrupt-enable bit (=mstatus.MIE= or =sstatus.SIE=) must also permit interrupt delivery.
+- =mtvec/stvec.BASE= must be at least 4-byte aligned; therefore the trap-entry handler itself must be placed at a 4-byte-aligned address, since the low two address bits are reused for =MODE=.
+
+** Decisions

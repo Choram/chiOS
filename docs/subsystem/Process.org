@@ -1,0 +1,234 @@
+#+title: Process
+
+* Purpose
+
+The process subsystem represents independently managed execution units.
+
+A process owns the execution state required to enter U-mode, enter the kernel on its behalf, suspend execution, and later resume it.
+
+The process model provides the state required by later scheduling code, but does not define scheduling policy.
+
+
+* Structure
+
+A process contains:
+
+#+begin_example
+Process
+├── pid
+├── state
+├── trap_frame
+├── context
+└── kernel_stack
+#+end_example
+
+
+** Process
+
+The initial process structure is conceptually:
+
+#+begin_src zig
+pub const Process = struct {
+    pid: Pid,
+    state: State,
+
+    trap_frame: trap.TrapFrame,
+    context: Context,
+
+    kernel_stack: KernelStack,
+};
+#+end_src
+
+A live =Process= remains at a stable address for its lifetime.
+
+
+** PID
+
+A PID identifies a live process.
+
+The initial PID type is:
+
+#+begin_src zig
+pub const Pid = u32;
+#+end_src
+
+PID 0 is reserved as an invalid process identity.
+
+A PID is conceptually independent of the process-table slot containing the process.
+
+
+** Process State
+
+The initial process states are:
+
+#+begin_src zig
+pub const State = enum {
+    unused,
+    ready,
+    running,
+    blocked,
+    exited,
+};
+#+end_src
+
+- =unused= means the process-table slot does not contain a live process.
+- =ready= means the process may be selected for execution.
+- =running= means the process currently owns execution.
+- =blocked= means the process is live but temporarily not runnable.
+- =exited= means the process has terminated and must not resume normal execution.
+
+A process-table slot remains =unused= while a new process is being constructed and becomes =ready= only after initialization is complete.
+
+
+** TrapFrame
+
+Each process owns one persistent =TrapFrame=.
+
+The =TrapFrame= contains the U-mode state associated with the process and is the state restored when that process enters or resumes U-mode.
+
+When U-mode traps into S-mode, the interrupted user state is saved into the same =TrapFrame=.
+
+A newly created process receives an initial =TrapFrame= rather than entering U-mode through a separate special-case path.
+
+Its important initial fields are:
+
+#+begin_example
+kernel_sp   = process kernel stack top
+kernel_trap = high-level trap handler
+sepc        = initial user entry point
+sp          = initial user stack top
+sstatus     = state permitting sret to U-mode
+other GPRs  = initial values
+#+end_example
+
+
+** Kernel Context
+
+Each process owns a saved kernel =Context=.
+
+The =Context= contains the S-mode CPU state required to suspend kernel execution belonging to the process and later resume it.
+
+The initial RISC-V context contains:
+
+#+begin_src zig
+pub const Context = extern struct {
+    ra: usize,
+    sp: usize,
+
+    s0: usize,
+    s1: usize,
+    s2: usize,
+    s3: usize,
+    s4: usize,
+    s5: usize,
+    s6: usize,
+    s7: usize,
+    s8: usize,
+    s9: usize,
+    s10: usize,
+    s11: usize,
+};
+#+end_src
+
+The =TrapFrame= and =Context= represent different execution states:
+
+#+begin_example
+TrapFrame
+    U-mode execution state
+
+Context
+    S-mode kernel execution state
+#+end_example
+
+A trap updates the =TrapFrame=. A kernel context switch updates the saved =Context=.
+
+
+** Kernel Stack
+
+Each live process owns a private kernel stack.
+
+The user stack is used during U-mode execution. The process kernel stack is used while the kernel executes on behalf of that process.
+
+The kernel-stack storage is allocated separately from the =Process= object.
+
+The process keeps enough metadata to identify the allocated stack and its initial stack top.
+
+#+begin_example
+KernelStack
+├── base
+└── top
+#+end_example
+
+The initial implementation uses one page per kernel stack.
+
+The kernel stack grows downward and its initial top is 16-byte aligned.
+
+=trap_frame.kernel_sp= is initialized to the top of the kernel stack belonging to the same process.
+
+If kernel execution is later suspended, =context.sp= identifies the current position inside that same kernel stack.
+
+
+** Process Table
+
+Processes are stored in a fixed process table.
+
+The table provides stable storage for =Process= objects and allows unused slots to be reused after a process has finished and its resources are no longer referenced.
+
+The process-table index is an internal storage location and is not a PID.
+
+
+* Operation
+
+1. Find an =unused= process-table slot.
+2. Assign a new nonzero PID.
+3. Allocate a private kernel stack.
+4. Initialize the process's =TrapFrame= with the kernel stack top, trap handler, user entry point, user stack pointer, and initial privilege state.
+5. Initialize the saved kernel =Context= to a known state.
+6. After all required process state is valid, change the process state to =ready=.
+7. When the process begins execution, change its state to =running= and enter U-mode by restoring its =TrapFrame=.
+8. A trap from the process saves its U-mode state back into the same =TrapFrame= and enters the kernel using its private kernel stack.
+9. Later context-switch code may save or restore the process's kernel =Context= while preserving the contents of its kernel stack.
+10. A process that can run again becomes =ready=, a process waiting for an event becomes =blocked=, and a terminated process becomes =exited=.
+11. After an exited process is no longer referenced and its owned resources are released, its table slot may return to =unused=.
+
+
+* Invariants
+
+- Every live process has a nonzero PID.
+- PID identity is independent of process-table position.
+- A process becomes =ready= only after all state required for execution is valid.
+- Every live process owns one persistent =TrapFrame=.
+- Every live process owns a private kernel stack.
+- The =TrapFrame= represents U-mode execution state and the =Context= represents S-mode execution state.
+- =trap_frame.kernel_sp= refers to the kernel stack belonging to the same process.
+- A saved =context.sp= refers to the kernel stack belonging to the same process.
+- Live =Process= objects remain at stable addresses.
+- An =unused= slot does not represent a live process.
+- A =blocked= or =exited= process is not runnable.
+- An =exited= process must not resume its previous saved execution state.
+
+
+* Notes
+
+** Gotchas
+
+- =TrapFrame.sp= is a user stack pointer; =Context.sp= is a kernel stack pointer.
+- A trap updates the =TrapFrame=; a context switch updates the =Context=.
+- =trap_frame.kernel_sp= is the trap-entry stack top, not necessarily the current =context.sp=.
+- The bootstrap kernel stack is not a per-process kernel stack.
+- A process-table index is not a PID.
+- Do not move a live =Process= object in memory.
+
+
+** Decisions
+
+- Each process owns a persistent =TrapFrame=.
+- Each process owns a separate kernel =Context=.
+- The kernel =Context= stores =ra=, =sp=, and =s0= through =s11=.
+- Each process owns a private kernel stack allocated separately from the =Process= object.
+- The initial kernel-stack size is one page.
+- Initial U-mode execution uses a prepared =TrapFrame= and the normal trap-return path.
+- Process storage uses a fixed table with stable object addresses.
+- PID 0 is reserved and PID identity is separate from table position.
+- Process states are =unused=, =ready=, =running=, =blocked=, and =exited=.
+- Scheduling policy and the actual context-switch mechanism are defined outside the process subsystem.

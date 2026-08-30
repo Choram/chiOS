@@ -1,0 +1,2210 @@
+#+title: Jird
+#+subtitle: A small dynamic concatenative system language
+#+startup: overview
+#+options: toc:3 num:nil
+
+* Status
+
+This document describes the current design of Jird.
+
+It intentionally removes ideas that are no longer part of the language, including the earlier static stack-effect/type system and length-indexed list design.
+
+Jird is still under development.  Sections marked as open describe intended direction without freezing every implementation detail.
+
+MICE is specified separately in =MICE.org=.  Jird defines language semantics. MICE defines how Jird is hosted interactively on chiOS.
+
+* Overview
+
+Jird is a small dynamic concatenative language intended for interactive system control.
+
+Its procedural core follows the Joy/Forth tradition:
+
+- evaluation is left to right;
+- values live on a data stack;
+- words consume and produce values;
+- quotations are first-class executable values;
+- composition is expressed by juxtaposition;
+- definitions are ordinary postfix operations;
+- filesystem and operating-system objects are ordinary values.
+
+Jird is intentionally not a conventional command shell language.
+
+A Path is not a string.  A quotation is not merely syntax.  A list of filesystem objects is a real list.  The same =map=, =filter=, and =fold= used for ordinary data can be used for filesystem-derived values.
+
+For example:
+
+#+begin_src text
+@: rodents@ childs [ size ] map 0 [ + ] fold .
+#+end_src
+
+computes the total size of the immediate children of =@: rodents@=.
+
+That computation can immediately become a new word:
+
+#+begin_src text
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+#+end_src
+
+Then:
+
+#+begin_src text
+@: rodents@ weight .
+#+end_src
+
+performs the same computation.
+
+Jird has no static type system.  Runtime values have kinds and primitives check their operands dynamically.
+
+Stack effects and symbolic descriptions may appear in =.jrd= metadata.  Metadata is for humans, tools, introspection, and symbolic reasoning.  It is not a compile- time proof system.
+
+Jird is also intended to contain a small symbolic layer natively.
+
+The long-term model is:
+
+#+begin_src text
+procedural
+    Program -> Value / Effect
+
+relational
+    Constraints -> Bindings
+
+planning
+    Goal -> Quote
+#+end_src
+
+The symbolic layer is not a chatbot or a second language.  It uses Jird values, relations, goals, failures, and quotations.
+
+* Core principles
+
+** Small language, strong composition
+
+Jird should gain power primarily by composition rather than by accumulating special syntax.
+
+Whitespace is already a composition operator:
+
+#+begin_src text
+vole jerboa marmot
+#+end_src
+
+means: execute =vole=, then =jerboa=, then =marmot=.
+
+No pipe operator is required.
+
+** Code is a value
+
+A quotation:
+
+#+begin_src text
+[ dup * ]
+#+end_src
+
+is an ordinary value.
+
+It can be stored, printed, passed to a combinator, returned from a planner, bound to a name, or executed with =run=.
+
+** System objects are values
+
+Jird should expose operating-system concepts through actual runtime values.
+
+Examples include:
+
+#+begin_src text
+Path
+Addr
+List
+Quote
+#+end_src
+
+and possibly later =Process=, =Mount=, =Device=, or =Socket= when those deserve stable first-class representations.
+
+** Dynamic checking
+
+Jird does not statically prove stack safety or type correctness.
+
+Instead, primitives validate runtime values.
+
+For example:
+
+#+begin_src text
+1 "vole" +
+#+end_src
+
+fails because =+= requires two integers.
+
+Likewise:
+
+#+begin_src text
+42 load32
+#+end_src
+
+fails because =LOAD32= requires an =Addr=.
+
+** Failure represents an obstruction
+
+A =Failure= is primarily created when a request is meaningful but the current state of the machine or symbolic world prevents Jird from continuing it as stated.
+
+Failure is therefore not the general representation of false values, malformed expressions, or low-level faults.
+
+It represents an unresolved mismatch between what the request requires and what the current world presently permits.
+
+The interactive purpose of Failure is to make that obstruction available to the user and to Jird's symbolic machinery until either the obstruction disappears or a usable continuation is produced.
+
+** Reasoning returns to Jird
+
+A symbolic plan should normally be returned as an ordinary Jird quotation.
+
+There is no private assistant action language.
+
+The user and the reasoner manipulate the same executable representation.
+
+* Metasyntactic variables
+
+Jird documentation uses a small rodent-based convention for metasyntactic names.
+
+When an example requires a generic category, class, or kind with no intended domain meaning, =Rodent= is preferred.
+
+Individual placeholder names are normally introduced in the order =vole=, =degu=, =mara=, =paca=, and =jerboa=, with additional rodent species used if an example survives long enough to require them.
+
+These names play the same role that =foo=, =bar=, =baz=, =qux=, =spam=, or =eggs= play in other programming literature.
+
+A =vole= is therefore not assumed to be small, furry, herbivorous, or even alive.
+
+It may denote an integer, a quotation, a path, an address, a process, a symbolic variable, or anything else required by the example.
+
+For example:
+
+#+begin_src text
+42 "vole" define
+[ dup * ] "degu" define
+@home mice@ "mara" define
+4096 alloc "paca" define
+#+end_src
+
+No relationship should be inferred between the biological properties of the named animals and the values they represent.
+
+In particular, =paca= does not imply contiguous storage, =mara= does not imply mobility, and =jerboa= should not be assumed to jump unless the example explicitly defines such an operation.
+
+If more than five meaningless names are required, authors are encouraged to continue with rodents rather than abandoning the convention.
+
+The order Rodentia contains enough species that exhaustion of this namespace is not considered a practical concern.
+
+Use of non-rodent metasyntactic variables is valid Jird and shall not affect program behavior, although examples in this specification should prefer rodents for consistency.
+
+* Lexical structure
+
+** Whitespace
+
+Jird is whitespace-oriented.
+
+Ordinary words are separated by whitespace.
+
+Compound delimiters may appear without internal padding:
+
+#+begin_src text
+[+]
+[size]
+#+end_src
+
+but canonical source formatting should normally use:
+
+#+begin_src text
+[ + ]
+[ size ]
+#+end_src
+
+for readability.
+
+** Case sensitivity
+
+Names are case-sensitive.
+
+#+begin_src text
+vole
+Vole
+VOLE
+#+end_src
+
+are distinct.
+
+** Comments
+
+=#= is the ordinary line-comment marker.
+
+#+begin_src text
+# this is a comment
+#+end_src
+
+A block-comment form is not required for the first implementation.
+
+* Evaluation model
+
+Jird evaluates tokens from left to right against a data stack and a dictionary.
+
+** Literals
+
+A literal pushes a value.
+
+#+begin_src text
+42
+ok
+"vole"
+[ dup * ]
+{ 1 2 3 }
+@home mice@
+#+end_src
+
+** Words
+
+An ordinary word is looked up when it is executed.
+
+A resolved binding may be a primitive, a quotation, or an ordinary value.
+
+Primitive bindings execute the primitive.
+
+Quotation bindings execute the quotation.
+
+Ordinary value bindings push the value.
+
+** Late lookup
+
+Names appearing inside quotations are resolved when the quotation executes.
+
+Example:
+
+#+begin_src text
+1 "vole" define
+[ vole . ] "squeak" define
+
+2 "vole" define
+squeak
+#+end_src
+
+prints:
+
+#+begin_src text
+2
+#+end_src
+
+This makes rebinding useful and keeps quotations connected to the live dictionary.
+
+** Failure
+
+If evaluation cannot complete because of invalid operands, unavailable resources, unsatisfied requirements, or other runtime conditions, the top-level request may produce a =Failure=.
+
+The evaluator aborts the remainder of the current interactive transaction.
+
+Rollback and prompt presentation belong to MICE.
+
+* Runtime values
+
+The initial runtime should remain small.
+
+** Int
+
+Machine-oriented integer.
+
+Examples:
+
+#+begin_src text
+0
+42
+-7
+1024
+0x10000000
+#+end_src
+
+The initial chiOS implementation may use the machine cell width.
+
+Overflow semantics should be explicitly documented once the representation is frozen.
+
+** Bool
+
+Boolean literals are:
+
+#+begin_src text
+ok
+no
+#+end_src
+
+where =ok= is true and =no= is false.
+
+These are ordinary language values, not MICE prompt states.
+
+Example:
+
+#+begin_src text
+ok> 1 2 = .
+no
+ok>
+#+end_src
+
+The proposition is false, but the computation succeeded.
+
+** String
+
+Strings are delimited by double quotes.
+
+#+begin_src text
+"vole"
+"weight"
+"hello"
+#+end_src
+
+Strings are also used as names for =define= and =lookup=.
+
+The exact escape syntax remains open.
+
+** Quote
+
+A quotation is delimited by square brackets.
+
+#+begin_src text
+[ dup * ]
+[ childs [ size ] map 0 [ + ] fold ]
+#+end_src
+
+It is pushed as a value and is not executed merely by being read.
+
+** List
+
+Lists are delimited by braces.
+
+#+begin_src text
+{ 1 2 3 }
+{ "vole" "jerboa" "marmot" }
+{ @home mice@ @tmp@ }
+#+end_src
+
+Jird has no static element type or static length.
+
+The runtime may initially permit heterogeneous lists.
+
+Collection combinators define their own runtime structural contracts.
+
+** Path
+
+Paths are first-class values with =@...@= syntax.
+
+Examples:
+
+#+begin_src text
+@home mice@
+@: rodents@
+@:: README.org@
+#+end_src
+
+Path semantics are specified later in this document.
+
+** Addr
+
+=Addr= is a machine address.
+
+It is a distinct runtime value kind from =Int= even if both are represented by one machine word internally.
+
+Jird has addresses, not a C-style pointer type system.
+
+There are no language types such as:
+
+#+begin_src text
+Pointer<Int>
+Pointer<Byte>
+MutablePointer<T>
+#+end_src
+
+A raw integer may be converted explicitly:
+
+#+begin_src text
+0x10000000 addr
+#+end_src
+
+An allocator may directly produce an Addr:
+
+#+begin_src text
+4096 alloc
+#+end_src
+
+which may print as:
+
+#+begin_src text
+addr(0x80412000)
+#+end_src
+
+Address arithmetic should remain explicit.
+
+#+begin_src text
+addr(0x10000000) 5 offset
+#+end_src
+
+Representative operations:
+
+#+begin_src text
+addr        ( Int -- Addr )
+offset      ( Addr Int -- Addr )
+
+load8       ( Addr -- Int )
+load16      ( Addr -- Int )
+load32      ( Addr -- Int )
+
+store8      ( Int Addr -- )
+store16     ( Int Addr -- )
+store32     ( Int Addr -- )
+
+alloc       ( Int -- Addr )
+free        ( Addr -- )
+#+end_src
+
+These effects are documentation only.
+
+** LogicVar
+
+The symbolic layer is intended to use logic variables.
+
+A likely surface syntax is:
+
+#+begin_src text
+_f
+_s
+_p
+#+end_src
+
+Exact scoping rules are still open.
+
+** Goal
+
+A =Goal= represents a symbolic statement or set of constraints that has not yet been fully solved.
+
+The exact printed representation is not frozen.
+
+** Failure
+
+A =Failure= represents a meaningful request for which Jird has no presently accepted continuation because the current machine state or symbolic state contains an obstruction.
+
+It is distinguished session state rather than a value that must automatically appear on the ordinary data stack.
+
+Conceptually:
+
+#+begin_src text
+Failure
+    request
+    desired
+    observed
+    obstruction
+    related
+    evidence
+    watch
+#+end_src
+
+The =watch= component is whatever information Jird needs to notice that the obstruction has disappeared.
+
+A successful symbolic recovery may instead convert the unresolved situation into an ordinary continuation, normally a =Quote= placed on the data stack, after which the Failure is no longer active.
+
+The exact internal representation may be smaller in early implementations.
+
+* Data stack
+
+** Basic stack words
+
+#+begin_src text
+dup
+drop
+swap
+over
+rot
+#+end_src
+
+Documentary effects:
+
+#+begin_src text
+dup     ( A -- A A )
+drop    ( A -- )
+swap    ( A B -- B A )
+over    ( A B -- A B A )
+rot     ( A B C -- B C A )
+#+end_src
+
+** =.=
+
+=.= pops and prints the top value.
+
+#+begin_src text
+ok> 1 2 3 .
+3
+ok>
+#+end_src
+
+On an empty stack it reports a language error.
+
+#+begin_src text
+ok> .
+The stack is empty.
+ok>
+#+end_src
+
+A malformed or invalid computation does not need to create a persistent Failure merely because evaluation could not continue.
+
+** =.s=
+
+=.s= prints the full stack without changing it.
+
+#+begin_src text
+ok> 1 2 4
+ok> .s
+<3> 1 2 4
+ok> .
+4
+ok> .s
+<2> 1 2
+ok>
+#+end_src
+
+An empty stack prints:
+
+#+begin_src text
+<0>
+#+end_src
+
+* Arithmetic, comparison, and conversion
+
+Expected arithmetic words include:
+
+#+begin_src text
++
+-
+*
+/
+mod
+#+end_src
+
+Expected comparisons:
+
+#+begin_src text
+=
+!=
+<
+<=
+>
+>=
+#+end_src
+
+Boolean words:
+
+#+begin_src text
+and
+or
+not
+#+end_src
+
+There are no implicit coercions.
+
+Conversions should be explicit.
+
+Examples:
+
+#+begin_src text
+"123" parse-int
+123 to-string
+0x10000000 addr
+#+end_src
+
+The exact conversion vocabulary remains open.
+
+* Quotations
+
+Quotations are Jird's primary abstraction mechanism.
+
+** =run=
+
+=run= executes a quotation.
+
+#+begin_src text
+ok> 10 [ 1 + ]
+ok> .s
+<2> 10 [ 1 + ]
+ok> run .
+11
+ok>
+#+end_src
+
+No =call= alias is required unless experience proves it useful.
+
+** Composition
+
+A quotation already expresses sequential composition.
+
+#+begin_src text
+[ vole jerboa marmot ]
+#+end_src
+
+Therefore a general =compose= primitive is not required for the common case.
+
+** =dip=
+
+=dip= temporarily removes the top value, executes a quotation on the remainder of the stack, then restores the saved value.
+
+#+begin_src text
+ok> 10 20 [ 1 + ] dip
+ok> .s
+<2> 11 20
+ok>
+#+end_src
+
+* Control and collection combinators
+
+The intended small core includes:
+
+#+begin_src text
+run
+dip
+if
+while
+map
+filter
+fold
+unpack
+#+end_src
+
+Additional Joy-style combinators should be added only when actual programs justify them.
+
+** =if=
+
+Intended form:
+
+#+begin_src text
+Bool [ true-branch ] [ false-branch ] if
+#+end_src
+
+Example:
+
+#+begin_src text
+10 0 >
+[ "positive" . ]
+[ "non-positive" . ]
+if
+#+end_src
+
+Only one branch runs.
+
+There is no static branch-shape check.
+
+** =while=
+
+A likely form is:
+
+#+begin_src text
+[ condition ] [ body ] while
+#+end_src
+
+The condition quotation must produce a Boolean at runtime.
+
+Exact stack framing remains open.
+
+** =map=
+
+=map= applies a quotation to each element of a list.
+
+#+begin_src text
+ok> { 1 2 3 4 } [ dup * ] map .
+{ 1 4 9 16 }
+ok>
+#+end_src
+
+Although Jird has no static type system, =map= should enforce a runtime structural contract so that one element invocation produces one result relative to the combinator frame.
+
+** =filter=
+
+=filter= keeps elements for which the quotation produces =ok=.
+
+#+begin_src text
+{ 1 2 3 4 5 6 } [ 2 mod 0 = ] filter
+#+end_src
+
+The predicate must produce one Bool result for each element.
+
+** =fold=
+
+=fold= uses an explicit initial accumulator.
+
+#+begin_src text
+ok> 0 { 1 2 3 4 } [ + ] fold .
+10
+ok>
+#+end_src
+
+Conceptually each invocation receives =accumulator element= and leaves one new accumulator.
+
+** =unpack=
+
+=unpack= removes a list and pushes its elements in order.
+
+#+begin_src text
+ok> { 10 20 30 } unpack
+ok> .s
+<3> 10 20 30
+ok>
+#+end_src
+
+The length is determined entirely at runtime.
+
+A filesystem-derived list may therefore be unpacked directly:
+
+#+begin_src text
+@: rodents@ childs unpack
+#+end_src
+
+No variadic static stack type is required.
+
+* Dictionary and definitions
+
+** Dictionary model
+
+Conceptually:
+
+#+begin_src text
+String -> Binding
+#+end_src
+
+A binding may refer to a primitive, a quotation, or an ordinary runtime value.
+
+** =define=
+
+=define= binds a value to a string name.
+
+Examples:
+
+#+begin_src text
+42 "vole" define
+@home mice Projects@ "nest" define
+4096 alloc "burrow" define
+[ dup * ] "hamster" define
+#+end_src
+
+The same operation is used for values, paths, addresses, and executable quotations.
+
+There is no separate:
+
+#+begin_src text
+var
+set
+:=
+#+end_src
+
+syntax.
+
+** Rebinding
+
+=define= also rebinds an existing name.
+
+#+begin_src text
+42 "vole" define
+57 "vole" define
+
+vole .
+#+end_src
+
+prints:
+
+#+begin_src text
+57
+#+end_src
+
+Therefore ordinary mutable-variable behavior can be expressed through rebinding without adding a second variable mechanism.
+
+How MICE persists or shadows already-existing names is a host policy and is not part of Jird's core =define= semantics.
+
+** Quotation bindings
+
+A quotation binding executes when its bare name is evaluated.
+
+#+begin_src text
+ok> [ dup * ] "hamster" define
+ok> 12 hamster .
+144
+ok>
+#+end_src
+
+** =lookup=
+
+=lookup= retrieves a binding without executing a quotation.
+
+#+begin_src text
+ok> "hamster" lookup .
+[ dup * ]
+ok>
+#+end_src
+
+Thus =12 hamster= is conceptually similar to =12 "hamster" lookup run= for a quotation binding.
+
+* No static type system
+
+Jird deliberately has no static stack/type checker.
+
+This is an explicit design choice.  The earlier static stack-effect system, length-indexed lists, and compile-time quotation-effect inference are not part of the current language.
+
+Earlier designs considered:
+
+#+begin_src text
+List<A, N>
+Quote<( A -- B )>
+#+end_src
+
+and symbolic list-length arithmetic.
+
+Those are no longer language semantics.
+
+Runtime kinds still matter.
+
+For example:
+
+#+begin_src text
+Int != Addr
+String != Path
+#+end_src
+
+even though no compile-time type checker proves those distinctions.
+
+Thus:
+
+#+begin_src text
+42 load32
+#+end_src
+
+fails dynamically because =LOAD32= requires an Addr.
+
+The intended distinction is:
+
+#+begin_src text
+dynamic runtime kinds
+    yes
+
+static type system
+    no
+#+end_src
+
+* =.jrd= files and metadata
+
+Jird source files use:
+
+#+begin_src text
+.jrd
+#+end_src
+
+A file may begin with metadata lines and then contain ordinary Jird code.
+
+Example:
+
+#+begin_src text
+&effect ( Path -- Int )
+&description Returns the combined size of the immediate children.
+
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+#+end_src
+
+** Metadata prefix
+
+=&= is reserved for file-level source metadata.
+
+Current intended keys include:
+
+#+begin_src text
+&effect
+&description
+&requires
+&causes
+#+end_src
+
+Metadata should appear before executable source.
+
+** =&effect=
+
+Example:
+
+#+begin_src text
+&effect ( Path -- Int )
+#+end_src
+
+This is documentation and is not statically verified.
+
+Higher-order or variadic effects may be written descriptively:
+
+#+begin_src text
+&effect ( A -- A A )
+&effect ( { A... } -- A... )
+&effect ( List Quote -- List )
+#+end_src
+
+** =&description=
+
+Example:
+
+#+begin_src text
+&description Returns the combined size of the immediate children.
+#+end_src
+
+** =&requires=
+
+=&requires= records a symbolic precondition.
+
+#+begin_src text
+&requires mounted(M)
+&requires not busy(M)
+#+end_src
+
+** =&causes=
+
+=&causes= records a symbolic effect.
+
+#+begin_src text
+&causes not mounted(M)
+#+end_src
+
+These declarations may be used by Jird's reasoner and planner.
+
+They do not replace runtime execution as the authority on what actually happens.
+
+* Path values
+
+Paths are one of Jird's defining system values.
+
+** Path is not String
+
+#+begin_src text
+"home mice notes.org"
+#+end_src
+
+is a String.
+
+#+begin_src text
+@home mice notes.org@
+#+end_src
+
+is a Path.
+
+Evaluating a Path literal performs no filesystem I/O.
+
+A nonexistent path is still a valid Path value.
+
+** Absolute by default
+
+No prefix means root-based absolute path.
+
+#+begin_src text
+@@
+@home@
+@home mice@
+@home mice notes.org@
+#+end_src
+
+The empty path is root.
+
+There is deliberately no visible root marker.
+
+** Relative paths
+
+A colon prefix marks dependence on the current path.
+
+#+begin_src text
+@:@
+@: vole@
+@::@
+@:: vole@
+@:::@
+@::: vole@
+#+end_src
+
+Meaning:
+
+#+begin_src text
+@:@          current
+@: vole@     current/vole
+
+@::@         parent
+@:: vole@    parent/vole
+
+@:::@        grandparent
+@::: vole@   grandparent/vole
+#+end_src
+
+One colon means current.  Each additional colon climbs one parent.
+
+Relative dependence is explicitly marked.
+
+** Resolution
+
+Relative syntax resolves to a canonical Path when evaluated.
+
+If the current path is:
+
+#+begin_src text
+@home mice Projects RAT@
+#+end_src
+
+then:
+
+#+begin_src text
+@: src@
+#+end_src
+
+produces the canonical value corresponding to:
+
+#+begin_src text
+@home mice Projects RAT src@
+#+end_src
+
+Later current-path changes do not alter the stored Path.
+
+** Component names
+
+Basic components use:
+
+#+begin_src text
+[A-Za-z0-9_]+
+#+end_src
+
+Files may additionally use =.= as an extension separator.
+
+Examples:
+
+#+begin_src text
+kernel
+PageTable
+foo_123
+kernel.zig
+README.org
+Image_01.png
+#+end_src
+
+Names are case-sensitive.
+
+Whitespace separates components.
+
+* Filesystem programming
+
+Jird should not require a separate filesystem query mini-language.
+
+Representative words include:
+
+#+begin_src text
+exists?
+childs
+walk
+read
+write
+stat
+remove
+
+name
+extension
+size
+file?
+#+end_src
+
+** =childs=
+
+=childs= returns the immediate children of a Path as a List of Paths.
+
+Example:
+
+#+begin_src text
+ok> @: rodents@ childs .
+{
+    path(@home mice Projects RAT rodents vole.txt@)
+    path(@home mice Projects RAT rodents jerboa.txt@)
+    path(@home mice Projects RAT rodents marmot.org@)
+}
+ok>
+#+end_src
+
+** Collection composition
+
+Filtering:
+
+#+begin_src text
+@: rodents@ childs
+[ extension "txt" = ] filter
+#+end_src
+
+Mapping:
+
+#+begin_src text
+@: rodents@ childs
+[ size ] map
+#+end_src
+
+Aggregation:
+
+#+begin_src text
+@: rodents@ childs
+[ size ] map
+0 [ + ] fold
+.
+#+end_src
+
+** Defining =weight=
+
+A characteristic Jird definition is:
+
+#+begin_src text
+[ childs [ size ] map 0 [ + ] fold ] "weight" define
+#+end_src
+
+Then:
+
+#+begin_src text
+@: rodents@ weight .
+#+end_src
+
+returns the total size of the immediate children.
+
+** =walk=
+
+=walk= recursively enumerates a subtree.
+
+Example:
+
+#+begin_src text
+@home mice Projects RAT@ walk
+[ file? ] filter
+[ extension "zig" = ] filter
+#+end_src
+
+The resulting list remains ordinary Jird data.
+
+* Low-level system access
+
+Jird is intended to remain usable for low-level system work.
+
+It should not wrap every machine concept in a large object hierarchy.
+
+** Addresses
+
+Machine addresses use =Addr=.
+
+Raw integers are not silently treated as addresses.
+
+Example:
+
+#+begin_src text
+0x10000005 addr load8
+#+end_src
+
+An MMIO base may itself be bound as an Addr:
+
+#+begin_src text
+0x10000000 addr "uart" define
+uart 5 offset load8
+#+end_src
+
+** Memory primitives
+
+Representative operations:
+
+#+begin_src text
+load8
+load16
+load32
+
+store8
+store16
+store32
+
+alloc
+free
+#+end_src
+
+Actual memory access remains subject to chiOS privilege and page-protection rules.
+
+** No pointer hierarchy
+
+=Addr= is a small tagged machine value.
+
+It is not the root of an object hierarchy.
+
+Jird should not add typed pointers, references, ownership types, or region types unless a concrete future requirement justifies them.
+
+* Failure
+
+Failure is one of the main mechanisms connecting ordinary execution, symbolic reasoning, diagnosis, planning, and the interactive state represented by MICE.
+
+** Meaning
+
+A Failure represents an unresolved obstruction between a meaningful request and the current state of the machine or symbolic world.
+
+The request is understood well enough to have a desired result, but Jird cannot continue it as stated because some fact of the current world prevents that result from being reached directly.
+
+For example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+#+end_src
+
+Conceptually:
+
+#+begin_src text
+requested
+    not mounted(@mnt archive@)
+
+observed
+    busy(@mnt archive@)
+
+obstruction
+    processes { 81 104 } hold files open
+#+end_src
+
+The request itself is valid.
+
+The problem is that reality does not currently satisfy the conditions required to continue it.
+
+Jird should be conservative when this mismatch matters: if a meaningful request cannot safely proceed because an external or symbolic condition is unresolved, the session may enter Failure rather than guessing what the user intended.
+
+** =no>= as an obstructed interaction state
+
+MICE displays =no>= while a Failure is active.
+
+The important meaning is not merely that the previous command returned an error.
+
+It means that the current request has encountered an unresolved obstruction and no continuation has yet been accepted.
+
+In this sense:
+
+#+begin_src text
+ok>    interaction has a valid continuation
+no>    interaction is blocked by an unresolved obstruction
+#+end_src
+
+A Failure is therefore closer to an interactive dead end than to an exception object.
+
+** What normally creates a Failure
+
+Failure is primarily intended for situations such as:
+
+- a file or resource required by a meaningful request is absent;
+- a mount or device is busy;
+- permission or authority required for an operation is unavailable;
+- a process or resource is in an incompatible state;
+- a dependency or prerequisite has not been established;
+- a symbolic goal cannot be satisfied under the current facts or constraints;
+- the system understands the requested state but cannot currently reach it safely.
+
+The exact set should remain conservative.
+
+Not every runtime error should become a persistent Failure.
+
+** What is not a Failure
+
+A Boolean result of =no= is not a Failure.
+
+#+begin_src text
+ok> 1 2 = .
+no
+ok>
+#+end_src
+
+Likewise, an invalid Jird expression such as a type mismatch, parser error, or ordinary stack misuse need not create a persistent Failure.
+
+Such an error may simply terminate the current evaluation and report what was wrong.
+
+Low-level interpreter, kernel, or hardware faults are also conceptually separate from Failure.
+
+A useful distinction is:
+
+#+begin_src text
+no
+    a proposition evaluated normally to false
+
+error
+    the Jird computation itself was malformed or invalid
+
+Failure
+    a meaningful request is blocked by the current world
+
+fault
+    the interpreter, kernel, or hardware entered an abnormal state
+#+end_src
+
+** Two ordinary ways out
+
+A Failure may stop being active in either of two ordinary ways.
+
+First, the obstruction itself may disappear.
+
+Second, Jird or the user may produce and accept a usable continuation.
+
+The first changes the world.
+
+The second changes the interaction from an unresolved dead end into an ordinary Jird value or program that can be inspected and acted upon.
+
+Explicit abandonment through =discard= is a third, separate escape hatch.
+
+** Obstruction disappears
+
+Consider:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+#+end_src
+
+If the processes holding the mount later release it, the Failure may disappear automatically.
+
+For example:
+
+#+begin_src text
+no> which [ terminate-graceful ] map
+ok>
+#+end_src
+
+The original =unmount= request has not necessarily been replayed.
+
+What changed is that the obstruction which made the interaction stuck is no longer present.
+
+The user may now retry the operation or continue in another direction.
+
+** Continuation is produced
+
+A Failure may also be resolved interactively even while the physical obstruction still exists.
+
+When =plan= successfully finds a recovery path, the preferred result is an ordinary Jird quotation pushed onto the data stack.
+
+For example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> ?
+ok>
+
+ok> .s
+<1> [
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+ok>
+#+end_src
+
+The mount may still be busy at this moment.
+
+What has disappeared is not necessarily the physical obstruction, but the lack of a continuation.
+
+Jird has reduced the unresolved situation to an ordinary executable value that the user can inspect, edit, store, compose, or run.
+
+This is enough to leave Failure because the interaction is no longer stuck.
+
+** Failure as a dialogue boundary
+
+The intended interaction is therefore:
+
+#+begin_src text
+request
+    |
+    v
+obstruction
+    |
+    v
+no>
+    |
+    +-- why   -> explanation
+    |
+    +-- which -> related Jird values
+    |
+    `-- ?     -> continuation
+                   |
+                   v
+                  ok>
+#+end_src
+
+The user and the symbolic machinery work on the same obstruction rather than switching to a separate assistant protocol.
+
+* Failure inspection
+
+Failure interaction uses a small explicit vocabulary.
+
+The user should not need a generic inference operator whose meaning changes with hidden context.
+
+Instead, each word asks for one kind of answer.
+
+** =why=
+
+=why= explains the active obstruction.
+
+Example:
+
+#+begin_src text
+no> why
+Two processes hold files open.
+no>
+#+end_src
+
+Explaining the obstruction does not itself provide a continuation, so the Failure remains active.
+
+** =which=
+
+=which= exposes ordinary Jird values that participate in the obstruction.
+
+Example:
+
+#+begin_src text
+no> which .
+{ 81 104 }
+no>
+#+end_src
+
+The values may then be used by ordinary Jird code.
+
+For example:
+
+#+begin_src text
+no> which [ terminate-graceful ] map
+ok>
+#+end_src
+
+If that computation removes the obstruction, Jird notices that the Failure is no longer current and the session returns to =ok>=.
+
+Merely inspecting the values does not necessarily resolve anything.
+
+** =undo=
+
+=undo= retracts the most recent formal refinement when the active interaction has a reversible refinement history.
+
+Its most characteristic use is a relational query that has just been refined to an empty candidate set.
+
+For example:
+
+#+begin_src text
+ok> _f @home mice@ under
+183 files remain.
+ok>
+
+ok> _f file
+141 files remain.
+ok>
+
+ok> _f _s sized
+141 files remain.
+ok>
+
+ok> _s 1GiB >
+7 files remain.
+ok>
+
+ok> _f writable
+No candidates remain.
+no>
+
+no> undo
+7 files remain.
+ok>
+#+end_src
+
+Here =undo= removes the most recently added requirement, reevaluates the current query Goal, and thereby restores a valid continuation.
+
+=undo= is not a universal rollback mechanism and does not reverse arbitrary external side effects.
+
+** =discard=
+
+=discard= abandons the current obstructed request.
+
+#+begin_src text
+no> discard
+ok>
+#+end_src
+
+This does not claim that the obstruction was removed and does not claim that the original request succeeded.
+
+It means only that the session will no longer treat that unresolved request as the current interaction.
+
+** =plan=
+
+=plan= asks for a Jird program that can reach a requested state or continue an obstructed request.
+
+When a Failure is active, a bare =plan= uses that Failure as the planning problem.
+
+For example:
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> plan
+ok>
+
+ok> .s
+<1> [
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+ok>
+#+end_src
+
+If a continuation is found, it is pushed as an ordinary =Quote= and the Failure is cleared because the interaction is no longer stuck.
+
+The external obstruction may still exist until the quotation is actually run.
+
+If no acceptable plan can be produced, the Failure remains active.
+
+** Automatic observation
+
+For Failures tied to real machine state, Jird needs some way to notice that an obstruction has disappeared.
+
+The first implementation may simply recheck the active Failure after successful interactive transactions that could plausibly affect it.
+
+A later implementation may track dependencies so that, for example, a mount-related Failure is reconsidered only when process, open-file, device, or mount state changes.
+
+* Local failure versus session Failure
+
+Symbolic reasoning requires a strict distinction between internal search failure and exposed top-level Failure.
+
+** Local branch failure
+
+During search, candidate branches may fail constantly.
+
+Example:
+
+#+begin_src text
+vole.txt
+    size > 1GiB
+    -> reject
+
+archive.img
+    size > 1GiB
+    -> accept
+#+end_src
+
+A rejected branch is normal control flow.
+
+It does not create a session Failure because the overall interaction still has other continuations to explore.
+
+** Top-level exhaustion
+
+Only when the requested goal as a whole has no solution should the reasoner create a Failure.
+
+Example:
+
+#+begin_src text
+_s 1GiB >
+_s 1KiB <
+?
+#+end_src
+
+may produce:
+
+#+begin_src text
+No value satisfies the current goal.
+#+end_src
+
+and create a Failure whose cause is the incompatible constraints.
+
+* Symbolic reasoning
+
+Symbolic reasoning is native to Jird.
+
+It is not a MICE assistant layered on top.
+
+** Intended scope
+
+The symbolic layer is deliberately small.
+
+It may initially support logic variables, explicit relations, bindings, unification, relation enumeration, small Horn-style rules, simple constraint propagation, explanation, graph search, and basic planning.
+
+It is not intended to be a general theorem prover.
+
+** Relations
+
+Possible relations include:
+
+#+begin_src text
+under
+child-of
+sized
+opens
+mounted-at
+#+end_src
+
+Where practical, concrete and relational uses should share vocabulary.
+
+Concrete use:
+
+#+begin_src text
+@: rodents vole.txt@ @home mice@ under .
+ok
+#+end_src
+
+Relational use:
+
+#+begin_src text
+_f @home mice@ under
+#+end_src
+
+creates or refines a current relational Goal involving =_f=.
+
+** Progressive refinement
+
+Relational queries do not require a separate solve or finalize operator.
+
+Adding a relation or constraint immediately refines the current Goal and updates the candidate set.
+
+For example:
+
+#+begin_src text
+ok> _f @home mice@ under
+183 files remain.
+ok>
+
+ok> _f file
+141 files remain.
+ok>
+
+ok> _f _s sized
+141 files remain.
+ok>
+
+ok> _s 1GiB >
+7 files remain.
+ok>
+#+end_src
+
+The short status line is only an interactive summary.
+
+The candidate set itself remains formal state and can be exposed explicitly with =candidates=.
+
+** =candidates=
+
+=candidates= pushes the current candidate set as an ordinary Jird value.
+
+For example:
+
+#+begin_src text
+ok> candidates .
+{
+    path(@home mice archive.img@)
+    path(@home mice disk_backup.bin@)
+    path(@home mice old_vm.img@)
+}
+ok>
+#+end_src
+
+Because the result is ordinary Jird data, it may immediately participate in further computation.
+
+#+begin_src text
+candidates [ size ] map
+candidates [ extension "img" = ] filter
+candidates 0 get
+#+end_src
+
+No separate query-result language is required.
+
+** Empty candidate sets
+
+If a newly added requirement removes every candidate, the relational interaction becomes obstructed.
+
+For example:
+
+#+begin_src text
+ok> _f writable
+No candidates remain.
+no>
+#+end_src
+
+The resulting Failure records that the current Goal has no continuation under the newly refined requirements.
+
+The user may inspect the obstruction:
+
+#+begin_src text
+no> why
+None of the seven remaining files are writable.
+no>
+#+end_src
+
+or retract the latest refinement:
+
+#+begin_src text
+no> undo
+7 files remain.
+ok>
+#+end_src
+
+The important point is that the user's formal requirements remain editable.
+
+A zero-candidate result does not force Jird to guess which requirement should be weakened.
+
+** Query state
+
+A current relational Goal may conceptually retain an ordered refinement history.
+
+For example:
+
+#+begin_src text
+C1 = under(_f, @home mice@)
+C2 = file(_f)
+C3 = sized(_f, _s)
+C4 = _s > 1GiB
+C5 = writable(_f)
+#+end_src
+
+This history supports incremental reevaluation, short candidate-count feedback, explanation, and =undo=.
+
+The exact internal representation is not part of the language surface.
+
+* Planning
+
+Planning is explicit in Jird and uses the word =plan=.
+
+The word has one semantic role: construct a Jird program that can reach a requested state or continue an obstructed request.
+
+** Planning before execution
+
+A quotation may describe the operation whose successful execution is desired.
+
+#+begin_src text
+[ @mnt archive@ unmount ] plan
+#+end_src
+
+If prerequisite actions are required, =plan= may return:
+
+#+begin_src text
+[
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+#+end_src
+
+The result is an ordinary =Quote=.
+
+** Planning after Failure
+
+A failed real operation may already contain enough structured information to serve as a planning problem.
+
+#+begin_src text
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> plan
+ok>
+
+ok> .s
+<1> [
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+ok>
+#+end_src
+
+The meaning of =plan= is the same in both cases.
+
+The difference is only where the planning problem comes from: an explicit quotation on the stack or the active Failure.
+
+** Plans remain visible
+
+A generated plan may be inspected, modified, stored, composed, or executed with =run=.
+
+The user remains responsible for deciding when execution occurs.
+
+Jird should not silently execute a synthesized plan merely because one exists.
+
+* Three modes of computation
+
+Jird's intended identity can be summarized by three related modes.
+
+** Procedural
+
+The user supplies the procedure.
+
+#+begin_src text
+@: rodents@ childs [ size ] map 0 [ + ] fold .
+#+end_src
+
+Conceptually:
+
+#+begin_src text
+Program -> Value / Effect
+#+end_src
+
+** Relational
+
+The user supplies formal constraints and Jird incrementally maintains the values that satisfy them.
+
+#+begin_src text
+_f @home mice@ under
+_f file
+_f _s sized
+_s 1GiB >
+candidates
+#+end_src
+
+Conceptually:
+
+#+begin_src text
+Constraints -> Candidate Set
+#+end_src
+
+There is no separate relational query terminator.
+
+** Planning
+
+The user supplies a desired operation or state and explicitly asks for a program that can reach it.
+
+#+begin_src text
+[ @mnt archive@ unmount ] plan
+#+end_src
+
+Conceptually:
+
+#+begin_src text
+Goal -> Quote
+#+end_src
+
+Failure connects these modes without introducing a generic inference operator.
+
+#+begin_src text
+ordinary execution
+        |
+        v
+     Failure
+      / |  \
+     /  |   \
+  why which plan
+            |
+            v
+          Quote
+#+end_src
+
+Relational Goals instead expose their current solution space through =candidates= and their recent refinements through =undo=.
+
+* Representative session
+
+#+begin_src text
+chiOS/0.1
+MICE/0.1
+
+ok> 2 3 + .
+5
+ok>
+
+ok> [ dup * ] "hamster" define
+ok> 12 hamster .
+144
+ok>
+
+ok> @: rodents@ childs [ size ] map 0 [ + ] fold .
+2407
+ok>
+
+ok> [ childs [ size ] map 0 [ + ] fold ] "weight" define
+ok> @: rodents@ weight .
+2407
+ok>
+
+ok> 4096 alloc "burrow" define
+ok> 42 burrow store32
+ok> burrow load32 .
+42
+ok>
+
+ok> _f @home mice@ under
+183 files remain.
+ok>
+
+ok> _f file
+141 files remain.
+ok>
+
+ok> _f _s sized
+141 files remain.
+ok>
+
+ok> _s 1GiB >
+7 files remain.
+ok>
+
+ok> _f writable
+No candidates remain.
+no>
+
+no> undo
+7 files remain.
+ok>
+
+ok> candidates .
+{
+    path(@home mice archive.img@)
+    path(@home mice disk_backup.bin@)
+    path(@home mice old_vm.img@)
+    ...
+}
+ok>
+
+ok> @mnt archive@ unmount
+The target is busy.
+no>
+
+no> why
+Two processes hold files open.
+no>
+
+no> which .
+{ 81 104 }
+no>
+
+no> plan
+ok>
+
+ok> .s
+<1> [
+    { 81 104 } [ terminate-graceful ] map
+    @mnt archive@ unmount
+]
+ok>
+#+end_src
+
+* Implementation sketch
+
+This section is non-normative.
+
+** Runtime value
+
+A possible Zig representation:
+
+#+begin_src zig
+const Value = union(enum) {
+    int: i32,
+    bool: bool,
+    string: *String,
+    quote: *Quote,
+    list: *List,
+    path: *Path,
+    addr: usize,
+
+    // Later:
+    // logic_var: LogicVar,
+    // goal: *Goal,
+};
+#+end_src
+
+Failure may live directly in session state rather than inside ordinary =Value=.
+
+** Session
+
+Conceptually:
+
+#+begin_src text
+Session
+    Stack
+    Dictionary
+    CurrentPath
+    Goal?
+    Failure?
+#+end_src
+
+** Failure
+
+A first implementation can be small:
+
+#+begin_src text
+Failure
+    request
+    obstruction
+    watch
+#+end_src
+
+A richer implementation may retain:
+
+#+begin_src text
+Failure
+    request
+    desired
+    observed
+    obstruction
+    related
+    evidence
+    watch
+#+end_src
+
+The session owns at most one active Failure initially.
+
+** Obstruction watch
+
+A first implementation may use a closed union describing what fact should be rechecked:
+
+#+begin_src text
+path-exists(P)
+path-not-exists(P)
+mount-not-busy(M)
+process-not-running(P)
+permission-available(X)
+goal-satisfiable(G)
+#+end_src
+
+Later this may generalize to a symbolic predicate.
+
+A successful =plan= does not need to wait for the watch to become true.
+
+If =plan= produces an accepted continuation quotation, it pushes that quotation and clears the active Failure directly.
+
+** Query state
+
+A current relational Goal may retain:
+
+#+begin_src text
+Goal
+    constraints
+    refinement history
+    candidate set
+#+end_src
+
+Adding a relation or constraint reevaluates the candidate set immediately.
+
+=candidates= exposes that set as an ordinary List.
+
+=undo= removes the most recent reversible refinement and reevaluates the Goal.
+
+** Symbolic engine
+
+The reasoner may internally contain:
+
+#+begin_src text
+fact store
+binding environment
+unifier
+rule table
+constraint propagation
+graph search
+planner
+#+end_src
+
+This internal separation does not create a second user-facing language.
+
+* Deliberate non-features
+
+** No static type system
+
+There is no mandatory stack-effect inference or compile-time list-length calculus.
+
+** No variable syntax
+
+There is no separate =var=, =set=, or =:== mechanism.
+
+Use =define= and rebinding.
+
+** No Forth colon definitions
+
+There is no:
+
+#+begin_src text
+: square dup * ;
+#+end_src
+
+Use:
+
+#+begin_src text
+[ dup * ] "square" define
+#+end_src
+
+** No pipe operator
+
+The stack and juxtaposition already provide composition.
+
+** No C-style pointer system
+
+Jird has =Addr= values and explicit memory operations.
+
+It does not have typed pointers.
+
+** No natural-language shell
+
+The user speaks Jird.
+
+** No hidden planner language
+
+Plans should be Jird quotations.
+
+* Open questions
+
+** Block comments
+
+=#= is the ordinary line-comment marker.
+
+Whether Jird ever needs a block-comment form remains open.
+
+** String escapes
+
+The minimum useful escape set still needs to be chosen.
+
+** Integer overflow
+
+Machine-width and overflow behavior need a precise rule.
+
+** Heterogeneous lists
+
+The runtime can support them, but the library contract should be decided.
+
+** =while= framing
+
+Exact stack discipline remains open.
+
+** Higher-order combinator framing
+
+=map=, =filter=, and =fold= need a precise runtime frame rule.
+
+** Logic variable scope
+
+Session-scoped, expression-scoped, or explicit goal-binding semantics remain open.
+
+** Goal representation
+
+The exact runtime and printed form is not frozen.
+
+** Relational dispatch
+
+Words such as =under= should remain predictable when used with concrete values and LogicVars.
+
+** User-defined rules
+
+The first reasoner may keep rules in native tables or metadata.
+
+A Jird syntax for defining new relations and rules can come later.
+
+** =retry=
+
+A dedicated =retry= word is not yet necessary.
+
+It may still be useful as shorthand for replaying the request that produced the current or most recent Failure after the obstruction has disappeared.
+
+** Address persistence
+
+An Addr normally refers to live runtime state.
+
+How, or whether, an Addr can ever be serialized is a MICE persistence question.
+
+* Compact summary
+
+#+begin_quote
+Jird is a small dynamic concatenative system language.
+
+Values live on a data stack, quotations are first-class programs, and definitions bind or rebind ordinary values, paths, addresses, or quotations to names.
+
+Paths and machine addresses are distinct runtime values represented by =Path= and =Addr=, while filesystem results are ordinary collections processed through ordinary combinators.
+
+Jird has no static type system, runtime kinds are checked dynamically, and documentation plus symbolic preconditions live in =&= metadata.
+
+Jird documentation conventionally uses =Rodent= and the placeholder sequence =vole=, =degu=, =mara=, =paca=, and =jerboa= when meaningless names are required.
+
+Relational queries are incremental rather than explicitly executed: each formal constraint immediately refines the current Goal, short status messages may report how many candidates remain, =candidates= exposes the current candidate set as ordinary Jird data, and =undo= can retract the most recent refinement when the query becomes obstructed.
+
+A =Failure= is primarily an interactive obstruction state: a meaningful request is understood, but the current machine or symbolic world prevents Jird from continuing it as stated.
+
+While no accepted continuation exists, MICE may present =no>=.
+
+The Failure disappears when the obstruction itself disappears, when the user retracts or abandons the blocking requirement, or when =plan= successfully converts the unresolved situation into a usable continuation, normally an ordinary quotation pushed onto the Jird stack.
+
+Thus =why= explains an obstruction, =which= exposes values participating in it, =candidates= exposes a relational solution space, and =plan= explicitly asks for a program that can reach a desired state.
+
+Jird does not use a generic question-mark inference operator.
+
+The user need not specify every procedure, but should specify what kind of answer is being requested.
+#+end_quote

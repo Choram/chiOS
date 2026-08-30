@@ -1,0 +1,578 @@
+#+title: <VIRTUAL MEMORY>
+
+* Purpose
+Sv32 provides virtual address translation and page-level access control for
+the RV32 kernel.
+
+The virtual-memory subsystem is responsible for:
+
+- creating and managing Sv32 page tables
+- mapping virtual pages to physical pages
+- assigning read/write/execute/user permissions
+- mapping kernel RAM and MMIO regions
+- activating address translation through =satp=
+- providing the basis for later user address spaces
+
+The initial kernel uses 4 KiB pages and identity mappings.
+
+
+* Structure
+** Virtual Address
+Sv32 uses a 32-bit virtual address divided into two virtual page numbers and
+one page offset.
+
+| Bits  | Field  | Width |
+|-------+--------+-------|
+| 31:22 | VPN[1] |    10 |
+| 21:12 | VPN[0] |    10 |
+| 11:0  | Offset |    12 |
+
+#+begin_example
+31            22 21            12 11             0
++---------------+----------------+----------------+
+|    VPN[1]     |     VPN[0]     |     Offset     |
++---------------+----------------+----------------+
+     10 bits          10 bits          12 bits
+#+end_example
+
+For a virtual address =va=:
+
+#+begin_example
+VPN[1] = (va >> 22) & 0x3ff
+VPN[0] = (va >> 12) & 0x3ff
+offset = va & 0xfff
+#+end_example
+
+Each VPN selects one of 1024 page-table entries.
+
+
+** Page Mapping
+A Level-0 leaf PTE maps one complete 4 KiB virtual page to one complete
+4 KiB physical page.
+
+Suppose:
+
+#+begin_example
+va = 0x81234567
+#+end_example
+
+The virtual address is divided into:
+
+#+begin_example
+VPN[1] | VPN[0] | offset
+#+end_example
+
+The processor first uses =VPN[1]= to select:
+
+#+begin_example
+root[VPN[1]]
+#+end_example
+
+This entry contains the physical address of a Level-0 page table.
+
+The processor then uses =VPN[0]= to select:
+
+#+begin_example
+level0[VPN[0]]
+#+end_example
+
+If this entry is a leaf PTE, its PPN specifies the physical page corresponding
+to the virtual page.
+
+The PTE does not map only one individual address. It maps the entire 4 KiB
+page.
+
+If:
+
+#+begin_example
+virtual page base  = VA
+physical page base = PA
+#+end_example
+
+then the mapping means:
+
+#+begin_example
+VA + 0x000 -> PA + 0x000
+VA + 0x001 -> PA + 0x001
+VA + 0x002 -> PA + 0x002
+...
+VA + 0xffe -> PA + 0xffe
+VA + 0xfff -> PA + 0xfff
+#+end_example
+
+Equivalently, for every offset =d= with:
+
+#+begin_example
+0 <= d <= 0xfff
+#+end_example
+
+the translation is:
+
+#+begin_example
+VA + d -> PA + d
+#+end_example
+
+The lower 12 bits of the virtual address are therefore not translated through
+the page tables. They are copied directly into the resulting physical address.
+
+#+begin_example
+VA:
++----------+----------+------------+
+| VPN[1]   | VPN[0]   | offset     |
++----------+----------+------------+
+                         |
+                         +------+
+                                |
+PTE.PPN                         |
+   |                            |
+   v                            v
+PA:
++-----------------------+------------+
+| physical page number  | offset     |
++-----------------------+------------+
+#+end_example
+
+Thus =root[VPN[1]]= selects the Level-0 table, =level0[VPN[0]]= selects the
+physical page, and the original =0x000..0xfff= offset selects the byte inside
+that page.
+
+** Page Sizes
+Sv32 supports leaf PTEs at either page-table level.
+
+| Leaf level | Page size | Name     |
+|------------+-----------+----------|
+| Level 0    | 4 KiB     | page     |
+| Level 1    | 4 MiB     | megapage |
+
+The initial implementation only creates Level-0 leaves.
+
+A Level-1 leaf represents a 4 MiB megapage. Its physical address must satisfy
+the required 4 MiB alignment; equivalently, the lower physical page-number
+field must be zero.
+
+
+** Page-Table Entry
+Each Sv32 PTE is 32 bits.
+
+| Bits  | Field  | Meaning                                  |
+|-------+--------+------------------------------------------|
+| 31:10 | PPN    | physical page number                     |
+| 9:8   | RSW    | reserved for supervisor software         |
+| 7     | D      | dirty                                    |
+| 6     | A      | accessed                                 |
+| 5     | G      | global                                   |
+| 4     | U      | user-accessible                          |
+| 3     | X      | executable                               |
+| 2     | W      | writable                                 |
+| 1     | R      | readable                                 |
+| 0     | V      | valid                                    |
+
+The physical page number is divided into:
+
+| Bits  | Field  | Width |
+|-------+--------+-------|
+| 31:20 | PPN[1] |    12 |
+| 19:10 | PPN[0] |    10 |
+
+Sv32 therefore stores a 22-bit physical page number.
+
+Together with the 12-bit page offset, this allows Sv32 PTEs to represent
+physical addresses up to 34 bits wide.
+
+
+** PTE Flags
+Useful architectural flag definitions are:
+
+#+begin_src zig
+const PTE_V: u32 = 1 << 0;
+const PTE_R: u32 = 1 << 1;
+const PTE_W: u32 = 1 << 2;
+const PTE_X: u32 = 1 << 3;
+const PTE_U: u32 = 1 << 4;
+const PTE_G: u32 = 1 << 5;
+const PTE_A: u32 = 1 << 6;
+const PTE_D: u32 = 1 << 7;
+#+end_src
+
+A PTE is interpreted according to =V/R/W/X=.
+
+| V | R | W | X | Meaning                     |
+|---+---+---+---+-----------------------------|
+| 0 | - | - | - | invalid                     |
+| 1 | 0 | 0 | 0 | next-level page-table entry |
+| 1 | * | * | * | leaf if R=1 or X=1          |
+
+The combination:
+
+#+begin_example
+R = 0
+W = 1
+#+end_example
+
+is reserved and invalid.
+
+Common leaf permissions are:
+
+| R | W | X | Meaning                |
+|---+---+---+------------------------|
+| 0 | 0 | 1 | execute only           |
+| 1 | 0 | 0 | read only              |
+| 1 | 0 | 1 | read + execute         |
+| 1 | 1 | 0 | read + write           |
+| 1 | 1 | 1 | read + write + execute |
+
+A non-leaf PTE has =R/W/X= clear and contains the physical address of the
+next-level page table.
+
+
+** Physical Address Encoding
+For a 4 KiB-aligned physical address:
+
+#+begin_example
+PPN = pa >> 12
+#+end_example
+
+The PPN begins at PTE bit 10:
+
+#+begin_example
+PTE = ((pa >> 12) << 10) | flags
+#+end_example
+
+The corresponding physical page address can be recovered using:
+
+#+begin_example
+pa = (PTE >> 10) << 12
+#+end_example
+
+For a non-leaf PTE, this address refers to another page table.
+
+For a leaf PTE, it refers to the mapped physical page.
+
+
+** Hardware Page Walk
+For an ordinary 4 KiB page, the hardware performs the following translation:
+
+1. Read the root page-table physical page number from =satp.PPN=.
+2. Use =VPN[1]= to select an entry from the root page table.
+3. Check the root PTE.
+4. If it is a non-leaf PTE, recover the Level-0 page-table address.
+5. Use =VPN[0]= to select an entry from the Level-0 table.
+6. Check that the Level-0 PTE is a valid leaf.
+7. Check its access permissions.
+8. Combine its PPN with the original 12-bit virtual-address offset.
+
+For a Level-0 leaf:
+
+#+begin_example
+PA = (PTE.PPN << 12) | VA[11:0]
+#+end_example
+
+The hardware performs the page-table walk. The kernel only constructs and
+modifies the tables.
+
+
+** Relevant CSRs
+*** satp
+=satp= selects the active supervisor address-translation scheme and root page
+table.
+
+For RV32:
+
+| Bits  | Field | Width | Meaning                              |
+|-------+-------+-------+--------------------------------------|
+| 31    | MODE  |     1 | address-translation mode             |
+| 30:22 | ASID  |     9 | address-space identifier             |
+| 21:0  | PPN   |    22 | root page-table physical page number |
+
+Relevant =MODE= values:
+
+| MODE | Meaning |
+|------+---------|
+|    0 | Bare    |
+|    1 | Sv32    |
+
+The initial kernel uses:
+
+#+begin_example
+MODE = 1
+ASID = 0
+PPN  = root_pa >> 12
+#+end_example
+
+Therefore:
+
+#+begin_example
+satp = (1 << 31) | (root_pa >> 12)
+#+end_example
+
+The root page table must be 4 KiB aligned.
+
+
+*** sstatus
+=sstatus= contains supervisor execution controls that affect virtual-memory
+permissions.
+
+Relevant fields include:
+
+| Bit | Field | Meaning                                      |
+|-----+-------+----------------------------------------------|
+|  19 | MXR   | allow loads from executable pages            |
+|  18 | SUM   | allow S-mode data access to user pages       |
+
+=SUM= affects S-mode loads and stores to pages with =U= set.
+
+It does not allow S-mode instruction fetches from user pages.
+
+These fields are mainly relevant after U-mode mappings are introduced.
+
+
+*** stvec
+=stvec= specifies the S-mode trap-handler entry point.
+
+A valid trap handler is required before deliberately generating page faults.
+
+
+*** scause
+=scause= records the reason for an S-mode trap.
+
+Relevant page-fault exception causes are:
+
+| Cause | Exception                |
+|-------+--------------------------|
+|    12 | instruction page fault   |
+|    13 | load page fault          |
+|    15 | store/AMO page fault     |
+
+
+*** stval
+For a page fault, =stval= normally contains the faulting virtual address.
+
+It is inspected together with =scause= to identify the failed memory access.
+
+
+*** sepc
+=sepc= contains the virtual address of the instruction at which a synchronous
+exception occurred.
+
+For a page fault, it identifies the instruction whose fetch or memory access
+failed.
+
+
+*** medeleg
+=medeleg= is an M-mode CSR used to delegate exceptions to S-mode.
+
+For S-mode page-fault handling, the firmware delegates exception causes:
+
+#+begin_example
+12  instruction page fault
+13  load page fault
+15  store/AMO page fault
+#+end_example
+
+Without delegation, these exceptions are handled in M-mode instead.
+
+More details at: [[file:traps.org][Traps]]
+
+** sfence.vma
+=sfence.vma= is an instruction rather than a CSR.
+
+It synchronizes page-table modifications with subsequent address translation
+and invalidates applicable cached translations.
+
+The initial kernel uses:
+
+#+begin_example
+sfence.vma x0, x0
+#+end_example
+
+which performs a global address-translation fence.
+
+
+* Operation
+1. Allocate one zeroed 4 KiB physical page from the physical page allocator
+   and use it as the root Sv32 page table.
+
+   #+begin_src zig
+   const root = createRoot() orelse return error.OutOfMemory;
+   #+end_src
+
+   Since Sv32 is still disabled at this point, the returned physical address
+   can be directly dereferenced by the kernel.
+
+2. For each virtual page that must be mapped, split the virtual address into
+   its two page-table indices.
+
+   #+begin_example
+   vpn1 = (va >> 22) & 0x3ff
+   vpn0 = (va >> 12) & 0x3ff
+   #+end_example
+
+3. Inspect =root[vpn1]=.
+
+   If the entry is invalid, allocate another zeroed 4 KiB physical page to
+   serve as the corresponding Level-0 page table.
+
+4. Encode the new Level-0 page-table physical address into the root PTE.
+
+   #+begin_example
+   root[vpn1] =
+       ((level0_pa >> 12) << 10)
+       | PTE_V
+   #+end_example
+
+   =R/W/X= remain clear, so this entry is interpreted as a non-leaf PTE.
+
+5. If =root[vpn1]= was already valid, verify that it is a non-leaf PTE and
+   recover the Level-0 page-table address from its PPN.
+
+   #+begin_example
+   level0_pa = (root[vpn1] >> 10) << 12
+   #+end_example
+
+6. Inspect =level0[vpn0]=.
+
+   The initial implementation rejects an already-valid entry rather than
+   silently replacing an existing mapping.
+
+7. Encode the requested physical page into the Level-0 leaf PTE together with
+   its access flags.
+
+   #+begin_example
+   level0[vpn0] =
+       ((pa >> 12) << 10)
+       | PTE_V
+       | flags
+   #+end_example
+
+   =A= is set for initial mappings, and =D= is also set for writable pages.
+
+8. Repeat the mapping operation for the physical RAM required by the kernel.
+
+   During initial bring-up, the discovered RAM region is identity-mapped:
+
+   #+begin_example
+   VA = PA
+   #+end_example
+
+   Thus each physical page is mapped using:
+
+   #+begin_example
+   mapPage(root, pa, pa, flags)
+   #+end_example
+
+9. Ensure that the kernel image, kernel stack, allocator metadata, page-table
+   pages, and any FDT memory still in use are covered by the RAM mappings.
+
+   The allocator currently stores free-list links directly inside free
+   physical pages, so allocator-managed RAM must remain dereferenceable after
+   Sv32 becomes active.
+
+10. Map UART MMIO separately because it lies outside ordinary RAM.
+
+    #+begin_example
+    VA 0x10000000 -> PA 0x10000000
+    #+end_example
+
+    The UART page requires supervisor read/write access and does not require
+    execute permission.
+
+11. Obtain the physical address of the root page table and construct the
+    =satp= value.
+
+    #+begin_example
+    MODE = 1
+    ASID = 0
+    PPN  = root_pa >> 12
+    #+end_example
+
+    Therefore:
+
+    #+begin_example
+    satp = (1 << 31) | (root_pa >> 12)
+    #+end_example
+
+12. Write the new value to =satp= from S-mode assembly.
+
+    #+begin_src asm
+    csrw satp, t0
+    #+end_src
+
+    Address translation becomes active for subsequent S-mode accesses.
+
+13. Execute a global address-translation fence.
+
+    #+begin_src asm
+    sfence.vma x0, x0
+    #+end_src
+
+    This ensures that subsequent accesses use translations consistent with
+    the newly installed page tables.
+
+14. Continue execution through the identity-mapped kernel address.
+
+    For example:
+
+    #+begin_example
+    before Sv32:
+    0x80201234 -> physical 0x80201234
+
+    after Sv32:
+    VA 0x80201234 -> PA 0x80201234
+    #+end_example
+
+    The numerical PC and stack addresses therefore remain unchanged across
+    the transition.
+
+15. Verify that ordinary kernel memory and UART output still work after
+    enabling Sv32.
+
+    Successful UART output is a simple confirmation that instruction fetch,
+    stack access, page-table traversal, RAM mappings, and UART MMIO mapping
+    survived the transition.
+
+16. After Sv32 is active, perform =sfence.vma= whenever active mappings are
+    modified before relying on the new translation.
+
+17. Once the S-mode trap path is available, deliberately access an unmapped
+    or permission-invalid page to test page-fault delivery.
+
+    The handler should inspect:
+
+    #+begin_example
+    scause
+    stval
+    sepc
+    #+end_example
+
+    For example, a load from an unmapped virtual address should produce
+    =scause = 13= and place the faulting virtual address in =stval=.
+
+
+* Invariants
+
+- Every Sv32 page table occupies exactly one 4 KiB physical page.
+- Every page-table physical address is 4 KiB aligned.
+- Page-table pages are zeroed before first use.
+- =VPN[1]= and =VPN[0]= are always in the range =0..1023=.
+- Every supported virtual page address is 4 KiB aligned.
+- Every supported physical page address is 4 KiB aligned.
+- Root entries used for Level-0 tables are valid non-leaf PTEs.
+- Level-0 mappings are valid leaf PTEs.
+- No PTE uses the reserved =R=0, W=1= encoding.
+- Kernel mappings have =U= clear until user mappings are introduced.
+- Existing valid mappings are not overwritten accidentally.
+- All memory required immediately after writing =satp= is already mapped.
+- The executing kernel code remains mapped across the Sv32 transition.
+- The active kernel stack remains mapped across the Sv32 transition.
+- Allocator-managed RAM remains accessible after Sv32 is enabled.
+- UART MMIO remains accessible after Sv32 is enabled.
+- Active mapping changes are followed by the required =sfence.vma=.
+
+
+* Notes
+** Gotchas
+- Multiple virtual pages may map to the same physical page, with different permissions if desired.
+- =PC= is not rewritten by =satp=, but S-mode instruction fetches use =PC= as a virtual address after Sv32 is enabled.
+- Therefore the currently used kernel RAM, stack, and UART addresses must already be mapped before enabling Sv32; the initial kernel uses identity mappings for them.
+
+** Decisions

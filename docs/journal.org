@@ -1,0 +1,3 @@
+#+title: Journal
+
+Use Timestamp (SPC m d T) to write a journal

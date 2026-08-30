@@ -1,0 +1,239 @@
+#+title: <BOOT / FIRMWARE>
+
+* Purpose
+Bring the QEMU =virt= machine from its initial M-mode state into a well-defined S-mode kernel environment.
+
+This stage is responsible only for early machine initialization and privilege handoff. Memory management, traps, scheduling, and other kernel facilities are initialized later.
+
+* Structure
+The boot path consists of the QEMU platform, a small M-mode firmware layer, and the S-mode kernel.
+
+** Privilege Modes
+RISC-V defines several privilege levels:
+- =M-mode= (Machine mode) - the highest privilege; controls machine level resources and CSRs.
+- =S-mode= (Supervisor mode) - intended for operating-system kernels.
+- =U-mode= (User mode) - intended for user programs.
+
+The CPU enters the firmware in M-mode. The firmware configures machine-level state and later transfers execution to S-mode.
+
+Important machine-level CSRs include:
+- =mhartid= - hardware thread ID.
+- =mstatus= - machine status and privilege-transition state.
+- =mepc= - address to resume execution at after =mret=
+- =mtvec= - M-mode trap-vector address.
+- =medeleg= - delegates selected exception to S-mode.
+- =mideleg= - delegates selected interrupts to S-mode.
+- =mie= / =mip= - machine interrupt enable and pending state.
+- =pmpcfgN= / =pmpaddrN= - Physical Memory Protection configuration.
+
+For an M -> S transition, =mstatus.MPP= specifies the privilege mode entered by =mret=, while =mepc= specifies the next program counter.
+
+=MPP= means Machine Previous Privilege. It normally records the privilege level from whicn an M-mode trap was taken; during boot, the firmware sets it explicitly to select the privilege level entered by =mret=.
+
+** UART
+A =UART (Universal Asynchronous Receiver/Transmitter)= is a serial communication device. During early boot it provides output without requiring interrupts, allocation, virtual memory, or a device framework.
+
+QEMU =virt= provides one NS16550-compatible UART; the current machine map places it at 0x10000000.
+
+The 16550 register interface includes:
+| Offset | Register        |
+|--------+-----------------|
+|      0 | RBR / THR / DLL |
+|      1 | IER / DLM       |
+|      2 | IIR / FCR       |
+|      3 | LCR             |
+|      4 | MCR             |
+|      5 | LSR             |
+|      6 | MSR             |
+|      7 | SCR             |
+
+The meaning of offsets 0 and 1 depends on =LCR.DLAB=:
+- =DLAB = 0= : offset 0 is receive/transmit data, offset 1 is interrupt enable.
+- =DLAB = 1= : offsets 0 and 1 contain the baud-rate divisor.
+
+Important early-boot registers are:
+- =THR= - Transmitter Holding Register; writing a byte sends it.
+- =RBR= - Receiver Buffer Register; reading it receives a byte.
+- =LSR= - Line Status Register.
+- =LSR.THRE= - indicates that THR can accept another byte.
+- =LSR.DR= - indicates that received data is available.
+
+UART registers are accessed through MMIO, meaning ordinary load/store instructions target device registers rather than RAM.
+
+** PMP
+=PMP (Physical Memory Protection)= controls physical-memory access permissions for lower privilege modes.
+
+Each PMP entry consists conceptually of:
+- =pmpaddrN= - address/range information
+- =pmpcfgN= - permissions and matching mode
+
+A PMP configuration byte contains:
+
+7       5 4   3 2 1 0
++-------+-----+-+-+-+
+|   L   | A   |X|W|R|
++-------+-----+-+-+-+
+
+where:
+- R: readable
+- W: writable
+- X: executable
+- A: address-matching mode
+- L: lock the entry until reset
+
+The =A= field selects one of four modes:
+| A = 00 | OFF   | entry disabled                        |
+| A = 01 | TOR   | Top Of Range                          |
+| A = 10 | NA4   | Naturally Aligned 4-byte region       |
+| A = 11 | NAPOT | Naturally Aligned Power-Of-Two region |
+
+=TOR= describes an arbitrary range using two boundaries:
+pmpaddr[N-1] <= address < pmpaddr[N]
+
+For entry 0, the lower boundary is implicitly zero.
+
+=NA4= describes exactly one naturally aligned 4-byte region.
+
+=NAPOT= describes a naturally aligned power-of-two region of at least 8 bytes. Its size is encoded using lower-order one bits in pmpaddrN.
+
+PMP entries are priority ordered: the lowest-numbered matching entry determines the access result. The L bit locks the entry and can also make its permissions apply to M-mode itself.
+
+** FDT
+The =FDT (Flattened Device Tree)=, usually stored as a Device Tree Blob (.dtb), is a binary description of the hardware platform.
+
+QEMU virt automatically generates a DTB unless one is explicitly supplied, and guest software is expected to use it to discover devices and their configuration.
+
+An FDT contains:
+- a header,
+- a memory-reservation block,
+- a structure block,
+- a strings block.
+
+Important header fields include:
+- magic
+- totalsize
+- off_dt_struct
+- off_dt_strings
+- off_mem_rsvmap
+- version
+- last_comp_version
+- size_dt_strings
+- size_dt_struct
+
+The magic value is: 0xd00dfeed
+
+The structure block represents a tree using tokens such as:
+- FDT_BEGIN_NODE
+- FDT_END_NODE
+- FDT_PROP
+- FDT_NOP
+- FDT_END
+
+Properties such as =compatible=, =reg=, =device_type=, =#address-cells=, and =#size-cells= describe devices and how their addresses are encoded.
+
+Multi-byte integers in the DTB are stored in big-endian form.
+
+At firmware entry, the boot interface provides:
+
+a0 = boot hart ID
+a1 = FDT physical address
+
+The firmware preserves this information and passes it to the kernel.
+
+** Firmware
+The firmware is a small M-mode bootstrap layer.
+
+Its responsibilities include:
+- establishing an initial stack and execution environment,
+- preserving boot information,
+- providing early UART access,
+- configuring machine-level protection,
+- preparing privilege transition state,
+- transferring control to S-mode.
+
+It deliberately avoids ordinary kernel responsibilities such as allocation, virtual-memory policy, scheduling, processes, and filesystems.
+
+** Kernel Handoff
+The firmware-to-kernel interface is intentionally small.
+
+The primary transition state consists of:
+
+| mepc        | next instruction address                    |
+| mstatus.MPP | privilege level selected by mret            |
+| a0          | boot hart ID                                |
+| a1          | FDT physical address                        |
+| sp          | valid stack, replaced by kernel stack early |
+
+Related CSRs such as medeleg and mideleg determine whether particular traps originating below M-mode are handled by M-mode or delegated to S-mode. Their individual bits correspond to exception and interrupt cause numbers.
+
+After mret, the kernel executes in S-mode and becomes responsible for the remaining system initialization.
+
+More details at: [[file:traps.org][Traps]]
+
+* Operation
+1. QEMU starts the CPU in M-mode and transfers control to the firmware.
+   At firmware entry:
+   - =a0= contains the boot hart ID.
+   - =a1= contains the FDT physical address.
+2. The firmware establishes an initial stack and preserves the boot
+   arguments before calling other routines.
+3. Early UART output is enabled through the NS16550 MMIO interface.
+   Transmission is performed by polling =LSR.THRE= and writing bytes
+   to =THR=.
+4. PMP is configured so that S-mode can access the physical memory
+   and MMIO regions required during early boot.
+5. The firmware prepares the M -> S privilege transition:
+   - =mepc= is set to the S-mode kernel entry address.
+   - =mstatus.MPP= is set to Supervisor mode.
+   - =a0= and =a1= are restored as the kernel boot arguments.
+6. =mret= transfers execution to the address in =mepc= and changes
+   the current privilege level to S-mode.
+7. The S-mode entry code installs the kernel stack and transfers
+   control to the main kernel initialization routine.
+8. The kernel validates the FDT and uses it to discover platform
+   information needed by later initialization stages.
+
+* Invariants
+- The CPU is executing the kernel in =S-mode=.
+- =mepc= was set to a valid S-mode kernel entry before =mret=.
+- =mstatus.MPP= was set to Supervisor mode before =mret=.
+- At kernel entry:
+  - =a0= contains the boot hart ID.
+  - =a1= contains a valid FDT physical address.
+- The kernel has a valid writable stack before entering higher-level
+  kernel code.
+- S-mode can access all physical regions required for early boot,
+  including kernel memory, the FDT, and UART MMIO.
+- Early UART output does not depend on interrupts, dynamic allocation,
+  virtual memory, or other kernel subsystems.
+- The FDT remains intact and readable until the kernel has finished
+  using or copying its contents.
+- Firmware-only machine initialization is completed before control is
+  transferred to S-mode.
+- Normal kernel execution does not require returning to the M-mode
+  firmware.
+
+* Notes
+** Gotchas
+A PMP entry is a memory-protection rule lists, not an execution entry point.
+
+#+begin_src sh
+qemu-system-riscv32 -M virt \
+  -bios build/elf/firmware.elf \
+  -device loader,file=build/elf/kernel.elf \
+  -display none \
+  -serial stdio \
+  -monitor none
+#+end_src
+
+- =-M virt= :: use the QEMU RISC-V =virt= machine.
+- =-bios firmware.elf= :: load and start the M-mode firmware.
+- =-device loader,file=kernel.elf= :: load the kernel ELF into memory, but do not execute it automatically.
+- The firmware must explicitly transfer control to the kernel entry point.
+- =-serial stdio= :: connect the guest UART to the host terminal.
+- =-display none= :: disable graphical output.
+- =-monitor none= :: disable the QEMU monitor.
+
+Under the ILP32 ABI, =sp= must remain 16-byte aligned at function-call boundaries. Allocate stack frames in multiples of 16 bytes.
+
+** Decisions
