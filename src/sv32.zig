@@ -1,6 +1,6 @@
 const mem = @import("memory.zig");
 
-pub const PAGE_SIZE: usize = 4096;
+pub const PAGE_SIZE = mem.PAGE_SIZE;
 pub const ENTRIES_PER_PAGE: usize = 1024;
 
 pub const PageTable = [ENTRIES_PER_PAGE]u32;
@@ -16,7 +16,13 @@ pub const PTE_D: u32 = 1 << 7;
 
 const PTE_RWX: u32 = PTE_R | PTE_W | PTE_X;
 
-fn isPageAlligned(addr: usize) bool {
+extern fn sfence_vma_all() void;
+
+pub fn sfenceVma() void {
+    sfence_vma_all();
+}
+
+fn isPageAligned(addr: usize) bool {
     return (addr & (PAGE_SIZE - 1)) == 0;
 }
 
@@ -57,7 +63,7 @@ pub fn mapPage(
     pa: usize,
     flags: u32,
 ) bool {
-    if (!isPageAlligned(va) or !isPageAlligned(pa))
+    if (!isPageAligned(va) or !isPageAligned(pa))
         return false;
 
     // R = 0, W = 1 is an invalid Sv32 leaf encoding.
@@ -114,8 +120,8 @@ pub fn mapRange(
     size: usize,
     flags: u32,
 ) bool {
-    if (!isPageAlligned(va_start) or
-        !isPageAlligned(pa_start) or
+    if (!isPageAligned(va_start) or
+        !isPageAligned(pa_start) or
         (size & (PAGE_SIZE - 1)) != 0)
         return false;
 

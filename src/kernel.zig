@@ -80,7 +80,7 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     uart.puts("RAM mapping OK\n");
 
     const uart_flag: usize = sv32.PTE_R | sv32.PTE_W;
-    if (!sv32.identityMapRange(root, uart.UART_BASE, sv32.PAGE_SIZE, uart_flag)) {
+    if (!sv32.identityMapRange(root, uart.UART_BASE, mem.PAGE_SIZE, uart_flag)) {
         uart.puts("UART mapping failed\n");
         while (true) {}
     }
@@ -108,7 +108,7 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     p.state = .running;
 
     const user_code_pa =
-        mem.allocPage() orelse @panic("falied to allocate user code page");
+        mem.allocPage() orelse @panic("failed to allocate user code page");
     const user_stack_pa =
         mem.allocPage() orelse @panic("failed to allocate user stack page");
 
@@ -129,6 +129,8 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     )) {
         @panic("failed to map user stack");
     }
+
+    sv32.sfenceVma();
 
     const code: [*]volatile u32 = @ptrFromInt(user_code_pa);
     code[0] = 0x0410_0513; // addi a0, zero, 65   ; a0 = 'A'

@@ -1,5 +1,6 @@
 .section .text
 .global enable_sv32
+.global sfence_vma_all
 
 .equ SATP_MODE_SV32,    0x80000000
 
@@ -19,4 +20,8 @@ enable_sv32:
 
     sfence.vma x0, x0
 
+    ret
+
+sfence_vma_all:
+    sfence.vma
     ret
