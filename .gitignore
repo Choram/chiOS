@@ -1,0 +1,16 @@
+# Build output
+src/build/
+
+# Object / binary artifacts
+*.o
+*.elf
+*.bin
+*.map
+*.dump
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
