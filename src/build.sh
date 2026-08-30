@@ -1,4 +1,5 @@
 #!/usr/bin/env sh
+set -eu
 
 ARCH=rv32i_zicsr
 ABI=ilp32
@@ -40,7 +41,7 @@ riscv32-elf-ld -m elf32lriscv \
     build/obj/trap_entry.o \
     -o build/elf/kernel.elf
 
-if [ "$1" = "--run" ]; then
+if [ "${1:-}" = "--run" ]; then
     qemu-system-riscv32 -M virt \
         -bios build/elf/firmware.elf \
         -device loader,file=build/elf/kernel.elf \
