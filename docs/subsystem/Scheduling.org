@@ -1,0 +1,380 @@
+#+title: Scheduling
+
+* Purpose
+
+The scheduling subsystem decides which runnable =Process= receives the CPU and provides the kernel-side mechanism required to suspend one process and resume another.
+
+chiOS uses 16 fixed priority levels, from =P0= to =P15=. Priority does not mean strict execution precedence. Instead, each priority corresponds to a scheduling weight and therefore determines the relative CPU entitlement of processes at that priority.
+
+Scheduling is performed in two stages. Smooth Weighted Round Robin (=SWRR=) selects a priority class, then ordinary round robin selects one process from that class.
+
+#+begin_example
+priority classes
+        |
+        | SWRR
+        v
+selected priority
+        |
+        | FIFO / RR
+        v
+selected process
+#+end_example
+
+Every priority has a positive weight. A continuously runnable low-priority process therefore remains eligible for CPU service even while higher-priority processes are runnable.
+
+The initial scheduler supports voluntary rescheduling through =SYS_YIELD= and involuntary rescheduling through supervisor timer preemption.
+
+
+* Structure
+
+The scheduler has 16 priority levels.
+
+#+begin_example
+P0   highest priority
+P1
+P2
+...
+P14
+P15  lowest priority
+#+end_example
+
+Each priority has a fixed per-process weight.
+
+#+begin_example
+P0  = 16
+P1  = 15
+P2  = 14
+P3  = 13
+P4  = 12
+P5  = 11
+P6  = 10
+P7  = 9
+P8  = 8
+P9  = 7
+P10 = 6
+P11 = 5
+P12 = 4
+P13 = 3
+P14 = 2
+P15 = 1
+#+end_example
+
+The weight table is scheduler policy. The SWRR mechanism must not depend on the weights following this particular linear sequence.
+
+Each =Process= has one fixed =priority=. Dynamic priority promotion and aging are not part of the initial scheduler.
+
+Runnable processes are stored in one FIFO ready queue for each priority.
+
+#+begin_example
+ready[0]
+ready[1]
+...
+ready[15]
+#+end_example
+
+A ready queue contains only processes in the =READY= state. Processes of the same priority are ordered by round robin.
+
+#+begin_example
+ready[5]
+
+A -> B -> C
+
+A runs for one execution interval and remains runnable:
+
+B -> C -> A
+#+end_example
+
+Each ready queue keeps its current process count =n[p]=.
+
+For a process at priority =p=, its individual scheduling weight is =w[p]=.
+
+The aggregate weight of a priority class is:
+
+#+begin_example
+class_weight[p] = n[p] * w[p]
+#+end_example
+
+The total runnable weight for one scheduling decision is:
+
+#+begin_example
+total_weight = sum of class_weight[p]
+#+end_example
+
+Multiplying the per-process weight by the number of runnable processes is important. The ready queue is an implementation bucket for processes with the same weight; it does not replace their individual CPU entitlement.
+
+For example:
+
+#+begin_example
+P2:
+    weight = 14
+    runnable processes = 3
+
+class_weight[2] = 3 * 14 = 42
+#+end_example
+
+The scheduler maintains one signed SWRR accumulator =current[p]= for every priority class.
+
+#+begin_example
+current[0]
+current[1]
+...
+current[15]
+#+end_example
+
+At one scheduling decision, every non-empty class contributes its aggregate weight:
+
+#+begin_example
+current[p] += class_weight[p]
+#+end_example
+
+The class =q= with the largest =current[q]= is selected, after which:
+
+#+begin_example
+current[q] -= total_weight
+#+end_example
+
+The process at the head of =ready[q]= is then selected.
+
+For continuously runnable processes using equal-length execution quanta, the long-term share of a process is proportional to its individual weight.
+
+#+begin_example
+process share ~= process weight / total runnable process weight
+#+end_example
+
+The scheduler therefore interprets priority as a discrete weight class rather than as a strict precedence level.
+
+Each process owns a =TrapFrame=, a =Context=, and a kernel stack.
+
+#+begin_example
+Process
+|
++-- TrapFrame
+|   U-mode continuation
+|
++-- Context
+|   S-mode continuation
+|
++-- kernel stack
+    S-mode call frames and local state
+#+end_example
+
+=TrapFrame= and =Context= may contain registers with the same architectural names, but they represent CPU state from different execution contexts.
+
+=TrapFrame= stores the U-mode continuation captured when the process traps into the kernel. It contains the user GPRs, =sepc=, =sstatus=, and kernel-entry metadata.
+
+=Context= stores the S-mode continuation required when kernel execution explicitly switches away from the process. It contains =ra=, =sp=, and =s0= through =s11=.
+
+#+begin_example
+TrapFrame.sp = user stack pointer
+Context.sp   = saved kernel stack pointer
+
+TrapFrame.ra = user x1
+Context.ra   = kernel continuation
+#+end_example
+
+The scheduler owns a separate =Context= and a separate scheduler stack.
+
+#+begin_example
+Process A kernel
+      |
+      | context switch
+      v
+Scheduler
+      |
+      | select next
+      v
+Process B kernel
+#+end_example
+
+This allows the scheduler to continue running without depending on the kernel stack of a process that may have exited or otherwise become non-runnable.
+
+A newly created process has no previous S-mode continuation. Its initial =Context= is therefore constructed synthetically.
+
+#+begin_example
+context.sp = kernel stack top
+context.ra = process bootstrap
+#+end_example
+
+The process bootstrap restores the process's initial =TrapFrame= and enters U-mode through the normal trap-return path.
+
+
+* Operation
+
+1. A process executes in U-mode.
+
+2. A trap transfers execution to S-mode. The trap may be caused by a syscall, a supervisor timer interrupt, or a user-mode exception.
+
+3. Trap entry saves the U-mode continuation into the current process's =TrapFrame= and switches to that process's kernel stack.
+
+4. Kernel handling continues on the process-owned kernel stack.
+
+5. A scheduling boundary is reached when the current process yields, exhausts its timer quantum, exits, faults, or otherwise becomes non-runnable.
+
+6. If the current process remains runnable, its state becomes =READY= and it is appended to =ready[process.priority]=.
+
+#+begin_example
+RUNNING
+   |
+   | yield / quantum expiration
+   v
+READY
+#+end_example
+
+7. If the process is =BLOCKED= or =EXITED=, it is not inserted into a ready queue.
+
+8. The current process's =Context= is saved and the scheduler's =Context= is restored. Execution continues on the scheduler stack.
+
+9. At the scheduling decision boundary, the ready queues contain all processes currently eligible for CPU service.
+
+10. For every non-empty priority =p=, compute:
+
+#+begin_example
+class_weight[p] = ready_count[p] * weight[p]
+#+end_example
+
+11. Compute the total runnable weight:
+
+#+begin_example
+total_weight = sum of all non-empty class weights
+#+end_example
+
+12. Update the SWRR accumulator of every non-empty priority:
+
+#+begin_example
+current[p] += class_weight[p]
+#+end_example
+
+13. Select the priority =q= whose =current[q]= is greatest.
+
+14. Charge the selected class for this scheduling decision:
+
+#+begin_example
+current[q] -= total_weight
+#+end_example
+
+15. Remove the process at the head of =ready[q]= and mark it =RUNNING=.
+
+16. Save the scheduler =Context= and restore the selected process's =Context=.
+
+17. If the process has executed before, kernel execution resumes at its previous context-switch continuation.
+
+18. Kernel handling eventually returns through the process's =TrapFrame=. The normal trap-return path restores U-mode state and executes =sret=.
+
+19. If the process has never executed before, its synthetic =Context= enters the process bootstrap path, which restores the initial =TrapFrame= and enters U-mode.
+
+=SYS_YIELD= voluntarily ends the current execution interval.
+
+#+begin_example
+RUNNING
+   |
+   | SYS_YIELD
+   v
+READY
+   |
+   v
+scheduler
+#+end_example
+
+The yielding process remains runnable. Yield does not place the process into =BLOCKED=.
+
+A supervisor timer interrupt involuntarily ends the current execution interval.
+
+#+begin_example
+RUNNING
+   |
+   | quantum expires
+   v
+READY
+   |
+   v
+scheduler
+#+end_example
+
+Timer preemption and =SYS_YIELD= use the same scheduler and the same process-selection policy.
+
+=SYS_EXIT= terminates the current process.
+
+#+begin_example
+RUNNING
+   |
+   | SYS_EXIT
+   v
+EXITED
+   |
+   v
+scheduler
+#+end_example
+
+An exited process is not returned to a ready queue.
+
+A fatal U-mode fault also removes only the affected process from scheduling. Fatal S-mode faults remain kernel failures.
+
+#+begin_example
+U-mode fault -> terminate process -> scheduler
+S-mode fault -> kernel fatal
+#+end_example
+
+General blocking and device-driven wakeup are not implemented by the initial scheduling phase. When blocking I/O is added, a blocked process will leave the ready queues and a later wakeup event will return it to =READY=.
+
+
+* Invariants
+
+- =P0= is the highest priority and =P15= is the lowest priority.
+- Every priority has a positive scheduling weight.
+- Priority represents relative CPU entitlement, not strict execution precedence.
+- Every =READY= process is present in exactly one ready queue.
+- A =RUNNING= process is not present in a ready queue.
+- A =BLOCKED= process is not present in a ready queue.
+- An =EXITED= process is not present in a ready queue.
+- A process may appear only in =ready[process.priority]=.
+- Every ready queue is FIFO.
+- Processes of the same priority are scheduled by round robin.
+- Priority-class weight is =ready_count[p] * weight[p]=.
+- The runnable process selected by a scheduling decision is included in the runnable population represented by that decision.
+- A runnable process that yields or is preempted is re-enqueued before the next scheduling decision.
+- =current[p]= is signed.
+- Empty priority classes do not participate in an SWRR decision.
+- The scheduler never selects a =BLOCKED= or =EXITED= process.
+- =TrapFrame= stores U-mode continuation state.
+- =Context= stores S-mode continuation state.
+- =TrapFrame= and =Context= are not interchangeable.
+- Every process executes kernel code on its own kernel stack.
+- The scheduler executes on its own scheduler stack.
+- An exited or faulted process is never resumed after control has transferred to the scheduler.
+- A newly created process enters U-mode through the same =TrapFrame= restoration path used by ordinary trap return.
+- =SYS_YIELD= and timer preemption use the same scheduling policy.
+- Interpreting weight ratios directly as CPU-time ratios assumes equal-length scheduling quanta.
+
+
+* Notes
+
+** Gotchas
+
+- Lower priority number means higher weight.
+- =current[p]= may become negative.
+- Do not omit the currently runnable process from the weight population before making the next SWRR decision.
+- =SYS_YIELD= keeps a process runnable.
+- =BLOCKED= processes must never remain in ready queues.
+- =TrapFrame.sp= is a user stack pointer; =Context.sp= is a kernel stack pointer.
+- Timer preemption ends an execution interval; it does not terminate the process.
+
+
+** Decisions
+
+- chiOS uses 16 fixed normal scheduling priorities.
+- The initial weight table is =16, 15, 14, ..., 1=.
+- The weight table is policy data and is kept separate from the SWRR mechanism.
+- Priority is treated as a discrete CPU-entitlement tier rather than strict precedence.
+- Priority classes use aggregate weight =n[p] * w[p]= so that per-process entitlement is preserved.
+- SWRR is used between priority classes.
+- FIFO round robin is used within a priority class.
+- Dynamic priority aging is not included in the initial scheduler.
+- SWRR accounting is performed per dispatch interval and assumes equal-length quanta for direct CPU-share interpretation.
+- A class with no runnable processes does not retain stale SWRR credit for a later unrelated runnable population.
+- SWRR ties are resolved deterministically; the exact tie-breaking rule is not part of the policy contract.
+- Process switching uses a separate scheduler =Context= and scheduler stack.
+- New processes begin from a synthetic =Context= and enter the common =TrapFrame= restore path.
+- =SYS_YIELD= is implemented before timer preemption so context switching and scheduler behavior can first be tested cooperatively.
+- Timer preemption reuses the same scheduling path as voluntary yield.
+- General wait queues and device-driven wakeup are deferred until asynchronous I/O support is implemented.
+- Real-time and deadline scheduling are outside the normal scheduler and may later be introduced as separate scheduling classes.

@@ -188,3 +188,39 @@ The process abstraction is intentionally independent of the scheduler policy. Ph
 
 See: [[file:subsystem/Process.org][Process]]
 Related source files: [[file:../src/process.zig]], [[file:../src/kernel.zig]]
+
+* Scheduling
+chiOS uses preemptive process scheduling with 16 fixed priority levels.
+
+Priority levels represent weighted CPU entitlement rather than strict execution precedence. Every priority has a positive weight, so lower-priority runnable processes still receive CPU time.
+
+Runnable processes are organized into one FIFO ready queue per priority level.
+
+The scheduler operates in two stages:
+
+1. Select a priority class using Smooth Weighted Round Robin (SWRR).
+2. Select a process from that class using round robin.
+
+Each process at priority p has a scheduling weight w[p]. If n[p] processes at that priority are runnable, the weight of the entire priority class is:
+
+class_weight[p] = n[p] * w[p]
+
+The initial weight policy is:
+
+P0  = 16
+P1  = 15
+P2  = 14
+...
+P14 = 2
+P15 = 1
+
+The weight table is scheduling policy and is kept separate from the scheduling mechanism.
+
+Each process owns a kernel execution context and a kernel stack. The kernel context stores the supervisor-mode continuation used during process switching, while the TrapFrame stores the corresponding user-mode continuation.
+
+Scheduling can occur voluntarily through SYS_YIELD or involuntarily through a supervisor timer interrupt.
+
+A runnable process that yields or exhausts its quantum returns to a ready queue. Blocked and exited processes are not runnable and are not selected by the scheduler. A user-mode fault terminates the affected process rather than the kernel.
+
+See: [[file:subsystem/Scheduling.org][Scheduling]]
+Related source files:
