@@ -35,7 +35,6 @@ var ready: [process.PRIORITY_COUNT]RunQueue = [_]RunQueue{.{}} ** process.PRIORI
 // calculate current value
 var current: [process.PRIORITY_COUNT]i32 = [_]i32{0} ** process.PRIORITY_COUNT;
 
-// current process
 var current_process: ?*Process = null;
 
 var scheduler_context: process.Context = undefined;

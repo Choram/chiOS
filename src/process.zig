@@ -15,8 +15,6 @@ pub const PRIORITY_LOWEST: Priority = 15;
 var process_table: [MAX_PROCESSES]Process = undefined;
 var next_pid: Pid = 1;
 
-pub var current_process: ?*Process = null;
-
 const PAGE_SIZE = mem.PAGE_SIZE;
 
 pub const State = enum {
@@ -100,7 +98,6 @@ pub fn init() void {
     }
 
     next_pid = 1;
-    current_process = null;
 }
 
 fn findUnusedSlot() ?*Process {
