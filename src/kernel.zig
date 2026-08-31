@@ -11,7 +11,6 @@ const scheduler = @import("scheduler.zig");
 const PAGE_SIZE: usize = mem.PAGE_SIZE;
 
 extern var __kernel_end: u8;
-extern fn install_supervisor_trap() void;
 
 export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     _ = hart_id;

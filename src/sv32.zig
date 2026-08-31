@@ -25,6 +25,10 @@ pub fn sfenceVma() void {
     sfence_vma_all();
 }
 
+pub fn enable(root_pa: usize) void {
+    enable_sv32(root_pa);
+}
+
 fn isPageAligned(addr: usize) bool {
     return (addr & (PAGE_SIZE - 1)) == 0;
 }

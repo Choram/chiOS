@@ -93,6 +93,10 @@ pub fn init() void {
     install_supervisor_trap();
 }
 
+pub fn enterUser(tf: *TrapFrame) noreturn {
+    enter_user(tf);
+}
+
 pub export fn supervisorTrap(
     cause: usize,
     epc: usize,

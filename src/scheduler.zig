@@ -17,7 +17,12 @@ extern fn context_switch(
     new: *const process.Context,
 ) void;
 
-extern fn enter_user(tf: *trap.TrapFrame) noreturn;
+pub fn switchContext(
+    old: *process.Context,
+    new: *const process.Context,
+) void {
+    context_switch(old, new);
+}
 
 // ready queue
 var ready: [process.PRIORITY_COUNT]RunQueue = [_]RunQueue{.{}} ** process.PRIORITY_COUNT;
@@ -115,7 +120,7 @@ fn schedulerLoop() noreturn {
     while (true) {
         const next = pickNext() orelse { continue; };
         current_process = next;
-        context_switch(&scheduler_context, &next.context);
+        switchContext(&scheduler_context, &next.context);
     }
 }
 
@@ -124,7 +129,7 @@ fn schedulerLoop() noreturn {
 // Hence we need to make "fake" kernel address, processBootstrap()
 fn processBootstrap() noreturn {
     const p = current_process orelse @panic("no current process");
-    enter_user(&p.trap_frame);
+    trap.enterUser(&p.trap_frame);
 }
 
 pub fn prepareProcess(p: *Process) void {
@@ -135,7 +140,7 @@ pub fn prepareProcess(p: *Process) void {
 
 pub fn start() noreturn {
     initSchedulerContext();
-    context_switch(&bootstrap_context, &scheduler_context);
+    switchContext(&bootstrap_context, &scheduler_context);
     unreachable;
 }
 
@@ -146,7 +151,7 @@ var context_test_hit: bool = false;
 
 fn contextSwitchTestEntry() noreturn {
     context_test_hit = true;
-    context_switch(&scheduler_context, &bootstrap_context);
+    switchContext(&scheduler_context, &bootstrap_context);
     unreachable;
 }
 
@@ -155,6 +160,8 @@ pub fn contextSwitchSelfTest() bool {
     scheduler_context = std.mem.zeroes(process.Context);
     scheduler_context.sp = schedulerStackTop();
     scheduler_context.ra = @intFromPtr(&contextSwitchTestEntry);
-    context_switch(&bootstrap_context, &scheduler_context);
+
+extern fn enable_sv32(root_pa: usize) void;
+extern fn install_supervisor_trap() void;switchContext(&bootstrap_context, &scheduler_context);
     return context_test_hit;
 }
