@@ -7,6 +7,11 @@ pub const Pid = u32;
 pub const INVALID_PID = 0;
 pub const MAX_PROCESSES: usize = 16;
 
+pub const Priority = u8;
+pub const PRIORITY_COUNT: usize = 16;
+pub const PRIORITY_HIGHEST: Priority = 0;
+pub const PRIORITY_LOWEST: Priority = 15;
+
 var process_table: [MAX_PROCESSES]Process = undefined;
 var next_pid: Pid = 1;
 
@@ -48,6 +53,8 @@ pub const KernelStack = struct {
 pub const Process = struct {
     pid: Pid,
     state: State,
+    priority: Priority,
+    run_next: ?*Process,
     trap_frame: trap.TrapFrame,
     context: Context,
     kernel_stack: KernelStack,
@@ -57,6 +64,8 @@ pub fn initUnused() Process {
     return .{
         .pid = INVALID_PID,
         .state = .unused,
+        .priority = PRIORITY_LOWEST,
+        .run_next = null,
         .trap_frame = std.mem.zeroes(trap.TrapFrame),
         .context = std.mem.zeroes(Context),
         .kernel_stack = .{
@@ -103,6 +112,7 @@ fn allocKernelStack() ?KernelStack {
 pub fn create(
     user_entry: usize,
     user_stack_top: usize,
+    priority: Priority,
 ) ?*Process {
     const p = findUnusedSlot() orelse return null;
     const kernel_stack = allocKernelStack() orelse return null;
@@ -117,6 +127,8 @@ pub fn create(
     p.trap_frame.sp = user_stack_top;
 
     p.state = .ready;
+
+    p.priority = priority;
 
     return p;
 }
