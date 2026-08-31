@@ -44,12 +44,12 @@
 - [X] Process table
 - [X] Process states
 
-* TODO Phase 5 - Scheduling [3/10]
+* TODO Phase 5 - Scheduling [5/10]
 - [X] Process priority state
 - [X] 16 priority ready queues
 - [X] Smooth weighted priority selection
-- [ ] Kernel context switch
-- [ ] Scheduler context and process bootstrap
+- [X] Kernel context switch
+- [X] Scheduler context and process bootstrap
 - [ ] SYS_YIELD / cooperative scheduling
 - [ ] Multi-process scheduling test
 - [ ] Process exit handling

@@ -18,6 +18,9 @@ riscv32-elf-as -march=$ARCH -mabi=$ABI sv32_control.s -o build/obj/sv32_control.
 echo "[AS] Assembling trap_entry.s"
 riscv32-elf-as -march=$ARCH -mabi=$ABI trap_entry.s -o build/obj/trap_entry.o
 
+echo "[AS] Assembling context_switch.s"
+riscv32-elf-as -march=$ARCH -mabi=$ABI context_switch.s -o build/obj/context_switch.o
+
 echo "[CP] Compile kernel.zig"
 zig build-obj kernel.zig \
     -target riscv32-freestanding \
@@ -39,6 +42,7 @@ riscv32-elf-ld -m elf32lriscv \
     build/obj/kernel.o \
     build/obj/sv32_control.o \
     build/obj/trap_entry.o \
+    build/obj/context_switch.o \
     -o build/elf/kernel.elf
 
 if [ "${1:-}" = "--run" ]; then

@@ -1,5 +1,6 @@
 const std = @import("std");
 const process = @import("process.zig");
+const trap = @import("trap.zig");
 
 const Process = process.Process;
 
@@ -11,11 +12,28 @@ const RunQueue = struct {
     count: usize = 0,
 };
 
+extern fn context_switch(
+    old: *process.Context,
+    new: *const process.Context,
+) void;
+
+extern fn enter_user(tf: *trap.TrapFrame) noreturn;
+
 // ready queue
 var ready: [process.PRIORITY_COUNT]RunQueue = [_]RunQueue{.{}} ** process.PRIORITY_COUNT;
 
 // calculate current value
 var current: [process.PRIORITY_COUNT]i32 = [_]i32{0} ** process.PRIORITY_COUNT;
+
+// current process
+var current_process: ?*Process = null;
+var scheduler_context: process.Context = undefined;
+
+var bootstrap_context: process.Context = undefined;
+
+// stack for scheduler (yeah we need that)
+const SCHEDULER_STACK_SIZE: usize = 4096;
+var scheduler_stack: [SCHEDULER_STACK_SIZE]u8 align(16) = undefined;
 
 pub fn enquene(p: *Process) void {
     std.debug.assert(p.state == .ready);
@@ -77,4 +95,66 @@ pub fn pickNext() ?*Process {
     const next = popFront(&ready[q]).?;
     next.state = .running;
     return next;
+}
+
+// stack grows top-down
+fn schedulerStackTop() usize {
+    return @intFromPtr(&scheduler_stack) + scheduler_stack.len;
+}
+
+// make Context
+// if the process is not processed before, there is no context;
+// hence we need to initialize
+fn initSchedulerContext() void {
+    scheduler_context = std.mem.zeroes(process.Context);
+    scheduler_context.sp = schedulerStackTop();
+    scheduler_context.ra = @intFromPtr(&schedulerLoop);
+}
+
+fn schedulerLoop() noreturn {
+    while (true) {
+        const next = pickNext() orelse { continue; };
+        current_process = next;
+        context_switch(&scheduler_context, &next.context);
+    }
+}
+
+// new process does not have
+// Process.Context.ra = "kernel address that has been terminated before"
+// Hence we need to make "fake" kernel address, processBootstrap()
+fn processBootstrap() noreturn {
+    const p = current_process orelse @panic("no current process");
+    enter_user(&p.trap_frame);
+}
+
+pub fn prepareProcess(p: *Process) void {
+    p.context = std.mem.zeros(process.Context);
+    p.context.sp = p.kernel_stack.top;
+    p.context.ra = @intFromPtr(&processBootstrap);
+}
+
+pub fn start() noreturn {
+    initSchedulerContext();
+    context_switch(&bootstrap_context, &scheduler_context);
+    unreachable;
+}
+
+
+
+// this is temporary test helper function; I'll delete them later
+var context_test_hit: bool = false;
+
+fn contextSwitchTestEntry() noreturn {
+    context_test_hit = true;
+    context_switch(&scheduler_context, &bootstrap_context);
+    unreachable;
+}
+
+pub fn contextSwitchSelfTest() bool {
+    context_test_hit = false;
+    scheduler_context = std.mem.zeroes(process.Context);
+    scheduler_context.sp = schedulerStackTop();
+    scheduler_context.ra = @intFromPtr(&contextSwitchTestEntry);
+    context_switch(&bootstrap_context, &scheduler_context);
+    return context_test_hit;
 }

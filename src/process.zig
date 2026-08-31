@@ -45,6 +45,25 @@ pub const Context = extern struct {
     s11: usize,
 };
 
+comptime {
+    if (@offsetOf(Context, "ra") != 0) @compileError("bad Context.ra offset");
+    if (@offsetOf(Context, "sp") != 4) @compileError("bad Context.sp offset");
+    if (@offsetOf(Context, "s0") != 8) @compileError("bad Context.s0 offset");
+    if (@offsetOf(Context, "s1") != 12) @compileError("bad Context.s1 offset");
+    if (@offsetOf(Context, "s2") != 16) @compileError("bad Context.s2 offset");
+    if (@offsetOf(Context, "s3") != 20) @compileError("bad Context.s3 offset");
+    if (@offsetOf(Context, "s4") != 24) @compileError("bad Context.s4 offset");
+    if (@offsetOf(Context, "s5") != 28) @compileError("bad Context.s5 offset");
+    if (@offsetOf(Context, "s6") != 32) @compileError("bad Context.s6 offset");
+    if (@offsetOf(Context, "s7") != 36) @compileError("bad Context.s7 offset");
+    if (@offsetOf(Context, "s8") != 40) @compileError("bad Context.s8 offset");
+    if (@offsetOf(Context, "s9") != 44) @compileError("bad Context.s9 offset");
+    if (@offsetOf(Context, "s10") != 48) @compileError("bad Context.s10 offset");
+    if (@offsetOf(Context, "s11") != 52) @compileError("bad Context.s11 offset");
+
+    if (@sizeOf(Context) != 56) @compileError("bad Context size");
+}
+
 pub const KernelStack = struct {
     base: usize,
     top: usize,
