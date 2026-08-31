@@ -223,4 +223,4 @@ Scheduling can occur voluntarily through SYS_YIELD or involuntarily through a su
 A runnable process that yields or exhausts its quantum returns to a ready queue. Blocked and exited processes are not runnable and are not selected by the scheduler. A user-mode fault terminates the affected process rather than the kernel.
 
 See: [[file:subsystem/Scheduling.org][Scheduling]]
-Related source files:
+Related source files: [[file:../src/process.zig]], [[file:../src/scheduler.zig]]
