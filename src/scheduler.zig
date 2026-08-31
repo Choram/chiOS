@@ -12,6 +12,11 @@ const RunQueue = struct {
     count: usize = 0,
 };
 
+const Candidate = struct {
+    queue: usize,
+    current: i32,
+};
+
 extern fn context_switch(
     old: *process.Context,
     new: *const process.Context,
@@ -32,23 +37,16 @@ var current: [process.PRIORITY_COUNT]i32 = [_]i32{0} ** process.PRIORITY_COUNT;
 
 // current process
 var current_process: ?*Process = null;
-var scheduler_context: process.Context = undefined;
 
+var scheduler_context: process.Context = undefined;
 var bootstrap_context: process.Context = undefined;
 
 // stack for scheduler (yeah we need that)
 const SCHEDULER_STACK_SIZE: usize = 4096;
 var scheduler_stack: [SCHEDULER_STACK_SIZE]u8 align(16) = undefined;
 
-pub fn enquene(p: *Process) void {
-    std.debug.assert(p.state == .ready);
-    std.debug.assert(p.priority <= process.PRIORITY_LOWEST);
-    const index: usize = @intCast(p.priority);
-
-    // pick the queue of priority of the process
-    var queue = &ready[index];
+fn pushBack(queue: *RunQueue, p: *Process) void {
     p.run_next = null;
-
     if (queue.tail) |tail| {
         tail.run_next = p;
     } else {
@@ -74,11 +72,17 @@ fn popFront(queue: *RunQueue) ?*Process {
     return p;
 }
 
+pub fn enqueue(p: *Process) void {
+    std.debug.assert(p.state == .ready);
+    std.debug.assert(p.priority <= process.PRIORITY_LOWEST);
+    const index: usize = @intCast(p.priority);
+    pushBack(&ready[index], p);
+}
+
 // Modified SWRR :3
 pub fn pickNext() ?*Process {
     var total_weight: i32 = 0;
-    var selected: ?usize = null;
-    var selected_current: i32 = 0;
+    var best: ?Candidate = null;
 
     for (&ready, 0..) |*queue, p| {
         if (queue.count == 0) {
@@ -90,15 +94,17 @@ pub fn pickNext() ?*Process {
         total_weight += class_weight;
         current[p] += class_weight;
 
-        if (selected == null or current[p] > selected_current) {
-            selected = p;
-            selected_current = current[p];
+        if (best == null or current[p] > best.?.current) {
+            best = .{
+                .queue = p,
+                .current = current[p],
+            };
         }
     }
 
-    const q = selected orelse return null;
-    current[q] -= total_weight;
-    const next = popFront(&ready[q]).?;
+    const selected = best orelse return null;
+    current[selected.queue] -= total_weight;
+    const next = popFront(&ready[selected.queue]).?;
     next.state = .running;
     return next;
 }
@@ -134,7 +140,7 @@ fn processBootstrap() noreturn {
 }
 
 pub fn prepareProcess(p: *Process) void {
-    p.context = std.mem.zeros(process.Context);
+    p.context = std.mem.zeroes(process.Context);
     p.context.sp = p.kernel_stack.top;
     p.context.ra = @intFromPtr(&processBootstrap);
 }
