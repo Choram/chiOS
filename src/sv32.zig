@@ -1,4 +1,6 @@
 const mem = @import("memory.zig");
+const uart = @import("uart.zig");
+const fdt = @import("fdt.zig");
 
 pub const PAGE_SIZE = mem.PAGE_SIZE;
 pub const ENTRIES_PER_PAGE: usize = 1024;
@@ -17,6 +19,7 @@ pub const PTE_D: u32 = 1 << 7;
 const PTE_RWX: u32 = PTE_R | PTE_W | PTE_X;
 
 extern fn sfence_vma_all() void;
+extern fn enable_sv32(root_pa: usize) void;
 
 pub fn sfenceVma() void {
     sfence_vma_all();
@@ -147,4 +150,43 @@ pub fn identityMapRange(
     flags: u32,
 ) bool {
     return mapRange(root, start, start, size, flags);
+}
+
+pub fn init(ram: fdt.MemoryRegion) ?*PageTable {
+    const root = createRoot() orelse {
+        uart.puts("Cannot allocate root page table\n");
+        return null;
+    };
+
+    uart.puts("Root page table OK\n");
+
+    const root_pa = @intFromPtr(root);
+
+    uart.puts("Root page table: ");
+    uart.putHex(root_pa);
+    uart.putc('\n');
+
+    const ram_flag: usize = PTE_R | PTE_W | PTE_X;
+    if (!identityMapRange(root, ram.base, ram.size, ram_flag)) {
+        uart.puts("RAM mapping failed\n");
+        return null;
+    }
+
+    uart.puts("RAM mapping OK\n");
+
+    const uart_flag: usize = PTE_R | PTE_W;
+    if (!identityMapRange(root, uart.UART_BASE, mem.PAGE_SIZE, uart_flag)) {
+        uart.puts("UART mapping failed\n");
+        return null;
+    }
+
+    uart.puts("UART mapping OK\n");
+
+    uart.puts("Enabling Sv32...\n");
+
+    enable_sv32(root_pa);
+
+    uart.puts("Sv32 OK\n");
+
+    return root;
 }

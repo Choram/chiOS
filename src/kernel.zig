@@ -11,16 +11,17 @@ const scheduler = @import("scheduler.zig");
 const PAGE_SIZE: usize = mem.PAGE_SIZE;
 
 extern var __kernel_end: u8;
-extern fn enable_sv32(root_pa: usize) void;
 extern fn install_supervisor_trap() void;
 
 export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     _ = hart_id;
 
+    // initialize trap
     trap.init();
 
     uart.puts("Kernel OK\n");
 
+    // read FDT data and extract the essentials
     const fdt_size = fdt.totalSize(fdt_ptr) orelse {
         uart.puts("Invalid FDT\n");
         while (true) {}
@@ -41,6 +42,8 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     uart.putHex(ram.size);
     uart.putc('\n');
 
+    // set the Region of memory that we are going to protect
+    // Like: kernel region and FDT region
     const reserved = [_]mem.Region{
         .{
             .start = ram.base,
@@ -52,47 +55,22 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
         },
     };
 
+    // initialize the memory
     mem.init(ram.base, ram.size, &reserved);
     uart.puts("Physical memory initialization OK\n");
     uart.puts("Pages : ");
     uart.putDec(mem.freePageCount());
     uart.putc('\n');
 
-    const root = sv32.createRoot() orelse {
-        uart.puts("Cannot allocate root page table\n");
+    // initialize SV32
+    const root = sv32.init(ram) orelse {
         while (true) {}
     };
 
-    uart.puts("Root page table OK\n");
+    // no use right now
+    _ = root;
 
-    const root_pa = @intFromPtr(root);
-
-    uart.puts("Root page table: ");
-    uart.putHex(root_pa);
-    uart.putc('\n');
-
-    const ram_flag: usize = sv32.PTE_R | sv32.PTE_W | sv32.PTE_X;
-    if (!sv32.identityMapRange(root, ram.base, ram.size, ram_flag)) {
-        uart.puts("RAM mapping failed\n");
-        while (true) {}
-    }
-
-    uart.puts("RAM mapping OK\n");
-
-    const uart_flag: usize = sv32.PTE_R | sv32.PTE_W;
-    if (!sv32.identityMapRange(root, uart.UART_BASE, mem.PAGE_SIZE, uart_flag)) {
-        uart.puts("UART mapping failed\n");
-        while (true) {}
-    }
-
-    uart.puts("UART mapping OK\n");
-
-    uart.puts("Enabling Sv32...\n");
-
-    enable_sv32(root_pa);
-
-    uart.puts("Sv32 OK\n");
-
+    // initialize process
     process.init();
 
     if (!scheduler.contextSwitchSelfTest()) {
