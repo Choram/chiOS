@@ -74,6 +74,7 @@ fn popFront(queue: *RunQueue) ?*Process {
     return p;
 }
 
+// Modified SWRR :3
 pub fn pickNext() ?*Process {
     var total_weight: i32 = 0;
     var selected: ?usize = null;
@@ -160,8 +161,6 @@ pub fn contextSwitchSelfTest() bool {
     scheduler_context = std.mem.zeroes(process.Context);
     scheduler_context.sp = schedulerStackTop();
     scheduler_context.ra = @intFromPtr(&contextSwitchTestEntry);
-
-extern fn enable_sv32(root_pa: usize) void;
-extern fn install_supervisor_trap() void;switchContext(&bootstrap_context, &scheduler_context);
+    switchContext(&bootstrap_context, &scheduler_context);
     return context_test_hit;
 }
