@@ -57,13 +57,13 @@
 - [ ] Supervisor timer interrupt / preemption
 
 * TODO Phase 5.5 - Platform Decoupling [0/7]
-- [ ] Introduce PlatformInfo and generic FDT discovery
-- [ ] Discover UART type / MMIO address from FDT
+- [ ] Generalize FDT parsing and introduce PlatformInfo
+- [ ] Discover console/UART type and MMIO layout from FDT
 - [ ] Handle RAM regions and reserved memory correctly
-- [ ] Replace built-in M-mode firmware with SBI boot
-- [ ] Remove platform knowledge from Sv32 / separate phys and virt addresses
-- [ ] Introduce fixed kernel virtual mapping
-- [ ] Make early boot relocatable
+- [ ] Define a clean firmware-kernel boot ABI
+- [ ] Remove platform policy from Sv32 and separate PA / VA
+- [ ] Introduce a fixed kernel virtual address and early boot stub
+- [ ] Make kernel physical placement dynamic
 
 * TODO Phase 6 - Block Device [0/5]
 - [ ] VirtIO MMIO discovery
