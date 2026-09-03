@@ -133,7 +133,9 @@ fn initSchedulerContext() void {
 
 fn schedulerLoop() noreturn {
     while (true) {
-        const next = pickNext() orelse { continue; };
+        const next = pickNext() orelse {
+            continue;
+        };
         current_process = next;
         switchContext(&scheduler_context, &next.context);
         current_process = null;
@@ -178,11 +180,7 @@ pub fn yieldCurrent() void {
         &p.context,
         &scheduler_context,
     );
-
-
 }
-
-
 
 // this is temporary test helper function; I'll delete them later
 var context_test_hit: bool = false;

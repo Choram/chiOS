@@ -120,8 +120,6 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     while (true) {}
 }
 
-
-
 // This is also a temporary test helper function
 fn makeTestProcess(
     root: *sv32.PageTable,
@@ -183,7 +181,7 @@ fn makeTestProcess(
 
     const stack_flags = sv32.PTE_R | sv32.PTE_W | sv32.PTE_U;
 
-    if(!sv32.mapPage(
+    if (!sv32.mapPage(
         root,
         user_stack_top - PAGE_SIZE,
         stack_pa,
