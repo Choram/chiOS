@@ -67,16 +67,143 @@ export fn kernelMain(hart_id: usize, fdt_ptr: usize) noreturn {
     };
 
     // no use right now
-    _ = root;
+    // _ = root;
 
     // initialize process
     process.init();
 
-    if (!scheduler.contextSwitchSelfTest()) {
-        @panic("context switch self-test failed");
-    }
+    const user_a = [_]u32{
+        0x04100513, // li a0, 'A'
+        0x00100893, // li a7, SYS_PUTC
+        0x00000073, // ecall
+        0x00300893, // li a7, SYS_YIELD
+        0x00000073, // ecall
+        0xfedff06f, // j loop
+    };
 
-    uart.puts("context switch OK\n");
+    const user_b = [_]u32{
+        0x04200513, // li a0, 'B'
+        0x00100893, // li a7, SYS_PUTC
+        0x00000073, // ecall
+        0x00300893, // li a7, SYS_YIELD
+        0x00000073, // ecall
+        0xfedff06f, // j loop
+    };
+
+    const a = makeTestProcess(
+        root,
+        &user_a,
+        0x0040_0000,
+        0x8000_0000,
+        0,
+    ) orelse {
+        uart.puts("Cannot create process A\n");
+        while (true) {}
+    };
+
+    const b = makeTestProcess(
+        root,
+        &user_b,
+        0x0040_1000,
+        0x7fff_f000,
+        0,
+    ) orelse {
+        uart.puts("Cannot create process B\n");
+        while (true) {}
+    };
+
+    scheduler.enqueue(a);
+    scheduler.enqueue(b);
+
+    scheduler.start();
 
     while (true) {}
+}
+
+
+
+// This is also a temporary test helper function
+fn makeTestProcess(
+    root: *sv32.PageTable,
+    code: []const u32,
+    user_entry: usize,
+    user_stack_top: usize,
+    priority: process.Priority,
+) ?*process.Process {
+    const code_size = code.len * @sizeOf(u32);
+    if (code_size > PAGE_SIZE) {
+        uart.puts("TEST: user code too large\n");
+        return null;
+    }
+
+    if (user_entry % PAGE_SIZE != 0) {
+        uart.puts("TEST: unaligned user entry\n");
+        return null;
+    }
+
+    if (user_stack_top % PAGE_SIZE != 0) {
+        uart.puts("TEST: unaligned user stack\n");
+        return null;
+    }
+
+    if (priority > process.PRIORITY_LOWEST) {
+        uart.puts("TEST: invalud priority\n");
+        return null;
+    }
+
+    const code_pa = mem.allocPage() orelse {
+        uart.puts("TEST: cannot allocate user code page\n");
+        return null;
+    };
+
+    const code_page: [*]u8 = @ptrFromInt(code_pa);
+    const code_bytes = std.mem.sliceAsBytes(code);
+
+    @memset(code_page[0..PAGE_SIZE], 0);
+    @memcpy(code_page[0..code_bytes.len], code_bytes);
+
+    const code_flags = sv32.PTE_R | sv32.PTE_X | sv32.PTE_U;
+    if (!sv32.mapPage(
+        root,
+        user_entry,
+        code_pa,
+        code_flags,
+    )) {
+        uart.puts("TEST: cannot map user code\n");
+        return null;
+    }
+
+    const stack_pa = mem.allocPage() orelse {
+        uart.puts("TEST: cannot allocate user stack page\n");
+        return null;
+    };
+
+    const stack_page: [*]u8 = @ptrFromInt(stack_pa);
+    @memset(stack_page[0..PAGE_SIZE], 0);
+
+    const stack_flags = sv32.PTE_R | sv32.PTE_W | sv32.PTE_U;
+
+    if(!sv32.mapPage(
+        root,
+        user_stack_top - PAGE_SIZE,
+        stack_pa,
+        stack_flags,
+    )) {
+        uart.puts("TEST: cannot map user stack\n");
+        return null;
+    }
+
+    sv32.sfenceVma();
+
+    const p = process.create(
+        user_entry,
+        user_stack_top,
+        priority,
+    ) orelse {
+        uart.puts("TEST: cannot create process\n");
+        return null;
+    };
+
+    scheduler.prepareProcess(p);
+    return p;
 }

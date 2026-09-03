@@ -1,10 +1,11 @@
 const std = @import("std");
 const process = @import("process.zig");
 const trap = @import("trap.zig");
+const uart = @import("uart.zig");
 
 const Process = process.Process;
 
-pub const weights = [_]u32{ 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
+pub const weights = [_]usize{ 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
 
 const RunQueue = struct {
     head: ?*Process = null,
@@ -22,7 +23,7 @@ extern fn context_switch(
     new: *const process.Context,
 ) void;
 
-pub fn switchContext(
+fn switchContext(
     old: *process.Context,
     new: *const process.Context,
 ) void {
@@ -72,8 +73,16 @@ fn popFront(queue: *RunQueue) ?*Process {
 }
 
 pub fn enqueue(p: *Process) void {
-    std.debug.assert(p.state == .ready);
-    std.debug.assert(p.priority <= process.PRIORITY_LOWEST);
+    if (p.state != .ready) {
+        uart.puts("SCHEDULER: enqueue non-ready process\n");
+        return;
+    }
+
+    if (p.priority > process.PRIORITY_LOWEST) {
+        uart.puts("SCHEDULER: invalud priority\n");
+        return;
+    }
+
     const index: usize = @intCast(p.priority);
     pushBack(&ready[index], p);
 }
@@ -127,6 +136,7 @@ fn schedulerLoop() noreturn {
         const next = pickNext() orelse { continue; };
         current_process = next;
         switchContext(&scheduler_context, &next.context);
+        current_process = null;
     }
 }
 
@@ -148,6 +158,28 @@ pub fn start() noreturn {
     initSchedulerContext();
     switchContext(&bootstrap_context, &scheduler_context);
     unreachable;
+}
+
+pub fn yieldCurrent() void {
+    const p = current_process orelse {
+        uart.puts("SCHEDULER: no current process\n");
+        return;
+    };
+
+    if (p.state != .running) {
+        uart.puts("SCHEDULER: current process is not running\n");
+        return;
+    }
+
+    p.state = .ready;
+    enqueue(p);
+
+    switchContext(
+        &p.context,
+        &scheduler_context,
+    );
+
+
 }
 
 

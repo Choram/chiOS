@@ -1,7 +1,9 @@
 const uart = @import("uart.zig");
+const scheduler = @import("scheduler.zig");
 
 pub const SYS_PUTC: usize = 1;
 pub const SYS_EXIT: usize = 2;
+pub const SYS_YIELD: usize = 3;
 
 pub fn dispatch(
     number: usize,
@@ -30,6 +32,11 @@ pub fn dispatch(
             uart.putc('\n');
 
             while (true) {}
+        },
+
+        SYS_YIELD => {
+            scheduler.yieldCurrent();
+            return 0;
         },
 
         else => {

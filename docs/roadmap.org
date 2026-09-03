@@ -44,14 +44,14 @@
 - [X] Process table
 - [X] Process states
 
-* TODO Phase 5 - Scheduling [5/17]
+* TODO Phase 5 - Scheduling [7/10]
 - [X] Process priority state
 - [X] 16 priority ready queues
 - [X] Smooth weighted priority selection
 - [X] Kernel context switch
 - [X] Scheduler context and process bootstrap
-- [ ] SYS_YIELD / cooperative scheduling
-- [ ] Multi-process scheduling test
+- [X] SYS_YIELD / cooperative scheduling
+- [X] Multi-process scheduling test
 - [ ] Process exit handling
 - [ ] User fault terminates process
 - [ ] Supervisor timer interrupt / preemption
